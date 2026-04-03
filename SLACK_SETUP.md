@@ -114,7 +114,7 @@ The connector automatically resolves names/emails to IDs.
 ## Security
 
 Bot tokens are stored securely in macOS Keychain under:
-- **Service**: `com.skopanev.nbp`
+- **Service**: `one.nbp.skk`
 - **Account**: `slack:{integration_id}`
 
 Only token metadata (workspace name) is stored in `~/.nbp/settings.json`.

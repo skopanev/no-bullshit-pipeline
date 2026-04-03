@@ -8,7 +8,7 @@ pub mod linear;
 pub mod webhook;
 
 #[cfg(not(debug_assertions))]
-pub const KEYCHAIN_SERVICE: &str = "com.skopanev.nbp";
+pub const KEYCHAIN_SERVICE: &str = "one.nbp.skk";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct IntegrationsConfig {

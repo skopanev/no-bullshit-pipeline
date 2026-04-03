@@ -12,7 +12,10 @@
       "WebSearch",
       "Bash(ntk:*)",
       "Bash(bun tauri:*)",
-      "Bash(bun update:*)"
+      "Bash(bun update:*)",
+      "Bash(ls -lh /Users/skopanev/Projects/nbp/builds/*.dmg)",
+      "Bash(chmod:*)",
+      "Bash(brew install:*)"
     ]
   }
 }

@@ -1,61 +1,81 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting build process..."
+SIGN_ID="Developer ID Application: Sergei Sharov (Z499WGKJW6)"
+APPLE_ID="${APPLE_ID:-thesergesha@gmail.com}"
+APPLE_PASSWORD="${APPLE_PASSWORD:-zgrr-vsxc-ahhk-oaqh}"
+APPLE_TEAM_ID="Z499WGKJW6"
 
-# 1. Run Tauri Build
-bun tauri build
-
-# 2. Extract Name and Version from tauri.conf.json
 NAME=$(grep '"productName":' src-tauri/tauri.conf.json | cut -d'"' -f4)
 VERSION=$(grep '"version":' src-tauri/tauri.conf.json | cut -d'"' -f4)
 
-# 3. Prepare builds directory
-mkdir -p builds
-
-# 4. Find generated DMG
-# Searching in the bundle output directory
-SEARCH_PATH="src-tauri/target/release/bundle"
-# Finding the most recent .dmg file in the bundle path
-DMG_PATH=$(find "$SEARCH_PATH" -name "*.dmg" -not -name "rw.*" | head -n 1)
-
-# Fallback: if tauri used a temporary "rw.XXXX" name, take it anyway
-if [ -z "$DMG_PATH" ]; then
-  DMG_PATH=$(find "$SEARCH_PATH" -name "*.dmg" | head -n 1)
+echo "==> Signing sidecar binary..."
+SIDECAR="src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin"
+if [ -f "$SIDECAR" ]; then
+  codesign --force --options runtime --sign "$SIGN_ID" \
+    --entitlements src-tauri/entitlements.plist "$SIDECAR"
+  echo "    Sidecar signed."
 fi
 
-if [ -n "$DMG_PATH" ]; then
-  TARGET_FILENAME="${NAME}_v${VERSION}.dmg"
-  cp "$DMG_PATH" "builds/$TARGET_FILENAME"
+echo "==> Building app (no DMG)..."
+bun tauri build --bundles app
 
-  # 5. Find and verify the .app bundle
-  APP_PATH=$(find "$SEARCH_PATH" -name "*.app" -type d | head -n 1)
+BUNDLE_DIR="src-tauri/target/release/bundle/macos"
+APP_PATH="$BUNDLE_DIR/$NAME.app"
 
-  if [ -n "$APP_PATH" ]; then
-    echo ""
-    echo "🔐 Verifying code signature and entitlements..."
-    echo ""
-
-    # Show signature info
-    echo "Signature:"
-    codesign -dvvv "$APP_PATH" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier)" || echo "  (unsigned or ad-hoc signed)"
-    echo ""
-
-    # Show entitlements
-    echo "Entitlements:"
-    codesign -d --entitlements :- "$APP_PATH" 2>&1 || echo "  (no entitlements or unsigned)"
-    echo ""
-
-    # Check Gatekeeper (if signed)
-    echo "Gatekeeper check:"
-    spctl -a -vvv "$APP_PATH" 2>&1 || echo "  (Gatekeeper check skipped - may need proper signing)"
-  fi
-
-  echo "--------------------------------------------------"
-  echo "✅ BUILD COMPLETE!"
-  echo "📦 Artifact: builds/$TARGET_FILENAME"
-  echo "--------------------------------------------------"
-else
-  echo "❌ Error: DMG file not found in $SEARCH_PATH"
+if [ ! -d "$APP_PATH" ]; then
+  echo "ERROR: $APP_PATH not found"
   exit 1
 fi
+
+echo "==> Verifying signature..."
+codesign -dvvv "$APP_PATH" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier)"
+
+echo "==> Creating DMG..."
+mkdir -p builds
+DMG_PATH="builds/${NAME}_v${VERSION}.dmg"
+rm -f "$DMG_PATH"
+
+create-dmg \
+  --volname "$NAME" \
+  --window-pos 200 120 \
+  --window-size 660 400 \
+  --icon-size 80 \
+  --icon "$NAME.app" 180 170 \
+  --app-drop-link 480 170 \
+  --hide-extension "$NAME.app" \
+  --no-internet-enable \
+  "$DMG_PATH" \
+  "$APP_PATH"
+echo "    DMG created: $DMG_PATH"
+
+echo "==> Notarizing DMG..."
+xcrun notarytool submit \
+  --apple-id "$APPLE_ID" \
+  --password "$APPLE_PASSWORD" \
+  --team-id "$APPLE_TEAM_ID" \
+  --wait \
+  "$DMG_PATH"
+
+echo "==> Stapling..."
+xcrun stapler staple "$DMG_PATH"
+
+echo "==> Gatekeeper check..."
+spctl -a -vvv "$APP_PATH" 2>&1 || true
+
+echo "==> Uploading to GitHub Releases..."
+TAG="v${VERSION}"
+gh release create "$TAG" "$DMG_PATH" \
+  --title "$NAME $TAG" \
+  --notes "Release $TAG" \
+  --latest \
+  2>/dev/null \
+|| gh release upload "$TAG" "$DMG_PATH" --clobber
+
+RELEASE_URL=$(gh release view "$TAG" --json url -q .url)
+
+echo ""
+echo "=================================================="
+echo "  BUILD COMPLETE: $DMG_PATH"
+echo "  GitHub Release: $RELEASE_URL"
+echo "=================================================="
