@@ -17,6 +17,9 @@ if [ -f "$SIDECAR" ]; then
   echo "    Sidecar signed."
 fi
 
+echo "==> Bundling JS..."
+bun esbuild.mjs
+
 echo "==> Building app (no DMG)..."
 bun tauri build --bundles app
 

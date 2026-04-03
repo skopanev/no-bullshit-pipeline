@@ -234,84 +234,19 @@ const savePipelineDefBtn = document.getElementById('save-pipeline-def-btn');
 const deletePipelineDefBtn = document.getElementById('delete-pipeline-def-btn');
 const closePipelineEditorBtn = document.getElementById('close-pipeline-editor');
 
-const PROMPT_PRESETS = [
-  {
-    label: 'Meeting Notes',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
-    step: {
-      name: 'meeting-notes',
-      connector: 'llm',
-      input: 'transcript',
-      config: { prompt_template: 'meeting-notes' },
-      description: 'Extract attendees, decisions, action items'
-    }
-  },
-  {
-    label: 'Action Items',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
-    step: {
-      name: 'action-items',
-      connector: 'llm',
-      input: 'transcript',
-      config: { prompt_template: 'action-items' },
-      description: 'Extract tasks and owners'
-    }
-  },
-  {
-    label: 'Summary',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>',
-    step: {
-      name: 'summary',
-      connector: 'llm',
-      input: 'transcript',
-      config: { prompt_template: 'summary' },
-      description: 'Concise summary of key points'
-    }
-  },
-  {
-    label: 'Structure',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M12 12h.01"/><path d="M17 12h.01"/><path d="M7 12h.01"/></svg>',
-    step: {
-      name: 'structure',
-      connector: 'llm',
-      input: 'transcript',
-      config: { prompt_template: 'structure' },
-      description: 'Organize content into sections'
-    }
-  },
-  {
-    label: 'Custom Prompt',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
-    step: null  // handled specially in Plan 05-03
-  }
-];
 
-const TOOL_PRESETS = [
-  {
-    label: 'CLI Agent',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
-    step: {
-      name: 'cli-agent',
-      connector: 'cli_agent',
-      input: 'transcript',
-      config: { cli: 'claude', prompt: '', timeout_secs: 300 },
-      description: 'Run Claude Code or Codex CLI as agent'
-    }
-  },
-  {
-    label: 'MCP Tool',
-    icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>',
-    step: {
-      name: 'mcp-tool',
-      connector: 'mcp',
-      input: 'transcript',
-      config: { url: '', tool: '' },
-      description: 'Call an MCP tool'
-    }
-  }
-];
-
-let pickerVisible = false;
+function addNewStep() {
+  const step = {
+    name: '',
+    connector: 'llm',
+    input: pipelineEditorSteps.length > 0 ? pipelineEditorSteps[pipelineEditorSteps.length - 1].name || 'transcript' : 'transcript',
+    config: {},
+  };
+  pipelineEditorSteps.push(step);
+  fixStepInputs();
+  renderPipelineSteps();
+  showStepEditor(pipelineEditorSteps.length - 1);
+}
 
 function buildDeliveryOptions() {
   const options = [];
@@ -388,134 +323,6 @@ function buildDeliveryOptions() {
   return options;
 }
 
-function togglePicker() {
-  const existing = document.getElementById('step-picker');
-  if (existing) {
-    existing.remove();
-    pickerVisible = false;
-    return;
-  }
-  showPicker();
-}
-
-function showPicker() {
-  const existing = document.getElementById('step-picker');
-  if (existing) existing.remove();
-
-  const picker = document.createElement('div');
-  picker.id = 'step-picker';
-  picker.className = 'step-picker';
-
-  // Prompt section
-  let html = '<div class="step-picker-section"><div class="step-picker-section-title">Prompt</div>';
-  for (const preset of PROMPT_PRESETS) {
-    html += `<button class="step-picker-option" data-preset-label="${escapeHtml(preset.label)}">
-      <span class="step-picker-icon">${preset.icon}</span>
-      <span class="step-picker-label">${escapeHtml(preset.label)}</span>
-    </button>`;
-  }
-  html += '</div>';
-
-  // Tool section
-  html += '<div class="step-picker-section"><div class="step-picker-section-title">Tool</div>';
-  for (const preset of TOOL_PRESETS) {
-    html += `<button class="step-picker-option" data-preset-label="${escapeHtml(preset.label)}">
-      <span class="step-picker-icon">${preset.icon}</span>
-      <span class="step-picker-label">${escapeHtml(preset.label)}</span>
-    </button>`;
-  }
-  html += '</div>';
-
-  // Output section
-  const deliveryOptions = buildDeliveryOptions();
-  html += '<div class="step-picker-section"><div class="step-picker-section-title">Output</div>';
-  if (deliveryOptions.length === 0) {
-    html += '<div class="step-picker-empty">Connect integrations in Settings &gt; Integrations to enable output steps.</div>';
-  } else {
-    for (let i = 0; i < deliveryOptions.length; i++) {
-      const opt = deliveryOptions[i];
-      html += `<button class="step-picker-option" data-delivery-index="${i}">
-        <span class="step-picker-icon">${opt.icon}</span>
-        <span class="step-picker-label">${escapeHtml(opt.label)}</span>
-      </button>`;
-    }
-  }
-  html += '</div>';
-
-  picker.innerHTML = html;
-
-  // Insert picker below the tiles flow
-  pipelineStepsListEl.parentNode.insertBefore(picker, pipelineStepsListEl.nextSibling);
-  pickerVisible = true;
-
-  // Wire preset clicks
-  picker.querySelectorAll('[data-preset-label]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const label = btn.dataset.presetLabel;
-      const preset = PROMPT_PRESETS.find(p => p.label === label) || TOOL_PRESETS.find(p => p.label === label);
-      if (!preset) return;
-      if (preset.step === null) {
-        closePicker();
-        showCustomPromptForm();
-        return;
-      } else {
-        addPresetStep(preset);
-      }
-    });
-  });
-
-  // Wire delivery clicks
-  picker.querySelectorAll('[data-delivery-index]').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const idx = parseInt(btn.dataset.deliveryIndex);
-      const opt = deliveryOptions[idx];
-      if (opt) addPresetStep(opt);
-    });
-  });
-
-  // Dismiss picker on outside click
-  setTimeout(() => {
-    document.addEventListener('click', dismissPicker);
-  }, 0);
-}
-
-function dismissPicker(e) {
-  const picker = document.getElementById('step-picker');
-  const addTile = document.getElementById('add-step-tile');
-  if (picker && !picker.contains(e.target) && e.target !== addTile && !addTile?.contains(e.target)) {
-    picker.remove();
-    pickerVisible = false;
-    document.removeEventListener('click', dismissPicker);
-  }
-}
-
-function closePicker() {
-  const picker = document.getElementById('step-picker');
-  if (picker) picker.remove();
-  pickerVisible = false;
-  document.removeEventListener('click', dismissPicker);
-}
-
-function addPresetStep(preset) {
-  const step = JSON.parse(JSON.stringify(preset.step));
-  // Auto-wire: delivery steps chain from the last step's output, not raw transcript
-  if (step.connector !== 'llm' && pipelineEditorSteps.length > 0) {
-    const lastStep = pipelineEditorSteps[pipelineEditorSteps.length - 1];
-    if (lastStep.name) step.input = lastStep.name;
-  }
-  pipelineEditorSteps.push(step);
-  fixStepInputs();
-  renderPipelineSteps();
-  closePicker();
-  maybeAutoName();
-  // Auto-open editor for delivery connectors that need configuration
-  const needsConfig = ['slack', 'notion', 'linear', 'webhook', 'save', 'mcp', 'cli_agent'];
-  if (needsConfig.includes(step.connector)) {
-    showStepEditor(pipelineEditorSteps.length - 1);
-  }
-}
 
 function suggestPipelineName() {
   const processing = [];
@@ -549,104 +356,6 @@ function maybeAutoName() {
   }
 }
 
-function showCustomPromptForm() {
-  // Remove any existing form
-  const existingForm = document.querySelector('.custom-prompt-form');
-  if (existingForm) existingForm.remove();
-
-  const formEl = document.createElement('div');
-  formEl.className = 'custom-prompt-form';
-  formEl.innerHTML = `
-    <div class="custom-prompt-header">Custom Prompt Step</div>
-    <textarea class="custom-prompt-textarea" rows="4"
-      placeholder="Write your prompt here. Use {transcript} for the input text."></textarea>
-    <label class="custom-prompt-save-label">
-      <input type="checkbox" class="custom-prompt-save-checkbox" />
-      Save as reusable template
-    </label>
-    <div class="custom-prompt-name-row" style="display:none;">
-      <input type="text" class="custom-prompt-name-input settings-input-text" placeholder="Template name (e.g. weekly-report)" />
-    </div>
-    <div class="custom-prompt-actions">
-      <button class="mini-action-btn custom-prompt-cancel">Cancel</button>
-      <button class="mini-action-btn primary custom-prompt-confirm">Add Step</button>
-    </div>
-  `;
-
-  // Insert form after the step list
-  pipelineStepsListEl.parentNode.insertBefore(formEl, pipelineStepsListEl.nextSibling);
-
-  // Wire checkbox toggle for name input
-  const checkbox = formEl.querySelector('.custom-prompt-save-checkbox');
-  const nameRow = formEl.querySelector('.custom-prompt-name-row');
-  checkbox.addEventListener('change', () => {
-    nameRow.style.display = checkbox.checked ? 'block' : 'none';
-  });
-
-  // Cancel
-  formEl.querySelector('.custom-prompt-cancel').addEventListener('click', () => {
-    formEl.remove();
-  });
-
-  // Confirm — Add Step
-  formEl.querySelector('.custom-prompt-confirm').addEventListener('click', async () => {
-    const promptText = formEl.querySelector('.custom-prompt-textarea').value.trim();
-    if (!promptText) {
-      showToast('Prompt text is required', 'error');
-      return;
-    }
-
-    const saveAsTemplate = checkbox.checked;
-    let stepConfig = {};
-
-    if (saveAsTemplate) {
-      const templateName = formEl.querySelector('.custom-prompt-name-input').value.trim();
-      if (!templateName) {
-        showToast('Template name is required when saving as template', 'error');
-        return;
-      }
-      // Save template to backend
-      try {
-        await invoke('save_prompt_template', {
-          template: {
-            name: templateName,
-            description: 'Custom prompt template',
-            prompt: promptText,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          }
-        });
-        // Reload templates so the step editor can see the new template
-        if (typeof loadPromptTemplates === 'function') await loadPromptTemplates();
-        stepConfig = { prompt_template: templateName };
-      } catch (err) {
-        showToast('Failed to save template: ' + err, 'error');
-        return;
-      }
-    } else {
-      // Inline prompt — no template saved
-      stepConfig = { prompt_inline: promptText };
-    }
-
-    const step = {
-      name: saveAsTemplate
-        ? formEl.querySelector('.custom-prompt-name-input').value.trim()
-        : 'custom-prompt',
-      connector: 'llm',
-      input: 'transcript',
-      config: stepConfig,
-      description: saveAsTemplate ? null : promptText.substring(0, 60) + (promptText.length > 60 ? '...' : '')
-    };
-
-    pipelineEditorSteps.push(step);
-    fixStepInputs();
-    formEl.remove();
-    renderPipelineSteps();
-  });
-
-  // Focus textarea
-  formEl.querySelector('.custom-prompt-textarea').focus();
-}
 
 async function loadPipelineDefs() {
   try {
@@ -845,7 +554,7 @@ function renderPipelineSteps() {
   if (addChip) {
     addChip.addEventListener('click', (e) => {
       e.stopPropagation();
-      togglePicker();
+      addNewStep();
     });
   }
 
@@ -904,701 +613,387 @@ function showStepEditor(index) {
   const step = pipelineEditorSteps[index];
   if (!step) return;
 
-  const promptTemplateOptions = allPromptTemplates.map(t =>
-    `<option value="${escapeHtml(t.name)}" ${step.config?.prompt_template === t.name ? 'selected' : ''}>${escapeHtml(t.name)}</option>`
-  ).join('');
+  // --- Reverse-map existing step to unified UI state ---
+  let toolType = 'none';
+  let hasPrompt = false;
+  let hasDelivery = false;
 
-  let configFields = '';
-  if (step.connector === 'llm') {
-    let promptField;
-    if (step.config?.prompt_inline) {
-      promptField = `<div class="step-editor-row"><label>Prompt</label><textarea data-field="prompt_inline" rows="3">${escapeHtml(step.config.prompt_inline)}</textarea></div>`;
-    } else {
-      promptField = `<div class="step-editor-row"><label>Prompt</label><select data-field="prompt_template"><option value="">Select template...</option>${promptTemplateOptions}</select></div>`;
-    }
-    const currentProvider = step.config?.provider || 'openai';
-    const currentModel = step.config?.model || '';
-    const expanded = modelSelectExpanded[currentProvider] || false;
-    const modelResult = buildModelOptions(currentProvider, currentModel, expanded);
-    const toggleBtn = modelResult.hasMore
-      ? `<button type="button" class="model-select-toggle" data-provider="${escapeHtml(currentProvider)}" style="font-size:0.68rem;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 0;margin-top:2px;">Show all ${modelResult.total} models</button>`
-      : expanded && modelResult.total > 4
-      ? `<button type="button" class="model-select-toggle" data-provider="${escapeHtml(currentProvider)}" style="font-size:0.68rem;color:var(--text-secondary);background:none;border:none;cursor:pointer;padding:2px 0;margin-top:2px;">Show less</button>`
-      : '';
-    configFields = `
-      ${promptField}
-      <div class="step-editor-row"><label>Provider</label><select data-field="provider" class="llm-provider-select">
-        <option value="openai" ${currentProvider === 'openai' ? 'selected' : ''}>OpenAI</option>
-        <option value="google" ${currentProvider === 'google' ? 'selected' : ''}>Google</option>
-        <option value="anthropic" ${currentProvider === 'anthropic' ? 'selected' : ''}>Anthropic</option>
-        <option value="local" ${currentProvider === 'local' ? 'selected' : ''}>Local LLM</option>
-        <option value="ollama" ${currentProvider === 'ollama' ? 'selected' : ''}>Ollama</option>
-        <option value="cli_agent" ${currentProvider === 'cli_agent' ? 'selected' : ''}>CLI Agent</option>
-      </select></div>
-      <div class="step-editor-row"><label>Model</label><div><select data-field="model" class="llm-model-select">
-        ${modelResult.html}
-      </select>${toggleBtn}</div></div>
-    `;
-  } else if (step.connector === 'save') {
-    const savePaths = (typeof savePathIntegrations !== 'undefined') ? savePathIntegrations : [];
-
-    if (savePaths.length === 0) {
-      // No save path integrations — fall back to free-text path input
-      configFields = `
-        <div class="step-editor-row"><label>Path</label><input data-field="path" value="${escapeHtml(step.config?.path || '')}" placeholder="~/Documents/{date}-{pipeline-name}.md" /></div>
-        <div class="step-editor-row" style="color: var(--text-secondary); font-size: 0.8rem;">Tip: Add named save paths in Settings &gt; Integrations for quick selection.</div>
-      `;
-    } else {
-      const saveOptions = savePaths.map(sp =>
-        `<option value="${escapeHtml(sp.id)}" ${step.config?.save_path_id === sp.id ? 'selected' : ''}>${escapeHtml(sp.name)} (${escapeHtml(sp.path)})</option>`
-      ).join('');
-      configFields = `
-        <div class="step-editor-row"><label>Save Location</label><select data-field="save_path_id">
-          <option value="">Select save path...</option>
-          ${saveOptions}
-        </select></div>
-        <div class="step-editor-row"><label>Filename</label><input data-field="filename" value="${escapeHtml(step.config?.filename || '')}" placeholder="{date}-{pipeline-name}.md" /></div>
-      `;
-    }
-  } else if (step.connector === 'webhook') {
-    const whProfiles = (typeof webhookProfiles !== 'undefined') ? webhookProfiles : [];
-    const webhookOptions = whProfiles.map(p =>
-      `<option value="${escapeHtml(p.id)}" ${step.config?.integration_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.method || 'POST')})</option>`
-    ).join('');
-
-    if (whProfiles.length === 0) {
-      configFields = `
-        <div class="step-editor-row" style="color: var(--text-secondary); font-size: 0.85rem;">No webhook endpoints configured. Add one in Settings &gt; Integrations.</div>
-      `;
-    } else {
-      configFields = `
-        <div class="step-editor-row"><label>Endpoint</label><select data-field="integration_id">
-          <option value="">Select endpoint...</option>
-          ${webhookOptions}
-        </select></div>
-      `;
-    }
+  if (step.connector === 'cli_agent') {
+    toolType = 'cli';
+    hasPrompt = !!step.config?.prompt;
+  } else if (step.connector === 'llm') {
+    toolType = 'model';
+    hasPrompt = !!(step.config?.prompt_template || step.config?.prompt_inline);
   } else if (step.connector === 'slack') {
-    const slackEntries = Object.entries(slackIntegrations);
-    const slackIntegrationOptions = slackEntries.map(([id, data]) =>
-      `<option value="${escapeHtml(id)}" ${step.config?.integration_id === id ? 'selected' : ''}>${escapeHtml(data.name)}</option>`
-    ).join('');
-    const wsRowStyle = slackEntries.length <= 1 ? 'display:none;' : '';
-    configFields = `
-      <div class="step-editor-row" style="${wsRowStyle}"><label>Workspace</label><select data-field="integration_id" class="slack-workspace-select">
-        <option value="">Select workspace...</option>
-        ${slackIntegrationOptions}
-      </select></div>
-      <div class="step-editor-row"><label>Target</label>
-        <select data-field="target" class="slack-target-select">
-          <option value="">Select channel or person...</option>
-        </select>
-        <div class="slack-target-loading" style="display:none;font-size:0.8rem;color:var(--text-secondary);margin-top:4px;">Loading channels &amp; members...</div>
-      </div>
-      <div class="step-editor-row slack-custom-target-row" style="display:none;">
-        <label>Custom Target</label>
-        <input data-field="target_custom" value="" placeholder="#channel, email@example.com, or U123456" />
-      </div>
-    `;
-  } else if (step.connector === 'cli_agent') {
-    const currentCli = step.config?.cli || 'claude';
-    const currentModelMode = step.config?.model_mode || 'default';
-    const currentModel = step.config?.model || '';
-    const currentProvider = step.config?.provider || '';
-    const currentModelArgs = step.config?.model_args || '';
-    const cliInfo = cliAvailabilityCache || FALLBACK_CLI_INFO;
-    const cliOptions = cliInfo.map(cli => {
-      const statusIcon = cli.installed ? '✓' : '✗';
-      const statusClass = cli.installed ? '' : ' style="color: var(--text-secondary)"';
-      const label = `${cli.name} ${statusIcon}`;
-      const selected = currentCli === cli.id ? ' selected' : '';
-      return `<option value="${escapeHtml(cli.id)}"${selected}${statusClass}>${escapeHtml(label)}</option>`;
-    }).join('');
-    const selectedCli = cliInfo.find(c => c.id === currentCli);
-    const notInstalledWarning = selectedCli && !selectedCli.installed
-      ? `<div class="cli-not-installed-warning" style="color: #e6453d; font-size: 0.8rem; margin-top: 4px;">⚠️ ${escapeHtml(selectedCli.name)} is not installed. Install: <code style="background: var(--bg-input); padding: 2px 6px; border-radius: 4px;">${escapeHtml(selectedCli.install_hint)}</code></div>`
-      : '';
-    const selectedCliModels = selectedCli?.models || [];
-    let modelOptions = '<option value="">Select model...</option>';
-    if (selectedCliModels.length > 0) {
-      const hasCurrentModel = selectedCliModels.some(m => m.id === currentModel);
-      if (currentModel && !hasCurrentModel) {
-        modelOptions += `<option value="${escapeHtml(currentModel)}" selected>${escapeHtml(currentModel)} (saved)</option>`;
-      }
-      modelOptions += selectedCliModels.map(m => `<option value="${escapeHtml(m.id)}" ${currentModel === m.id ? 'selected' : ''}>${escapeHtml(m.name)}</option>`).join('');
-    } else {
-      modelOptions = '<option value="">No models available</option>';
-    }
-    const selectedCliProviders = selectedCli?.providers || [];
-    const providerOptions = selectedCliProviders.length > 0
-      ? '<option value="">Auto-detect</option>' + selectedCliProviders.map(p => `<option value="${escapeHtml(p.id)}" ${currentProvider === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')
-      : '';
-    const isAdvanced = currentModelMode === 'advanced';
-    const defaultModeStyle = isAdvanced ? 'display:none;' : '';
-    const advancedModeStyle = isAdvanced ? '' : 'display:none;';
-    const opencodeProviderRow = currentCli === 'opencode' ? '' : 'display:none;';
-    configFields = `
-      <div class="step-editor-row"><label>CLI</label>
-        <select data-field="cli" class="cli-select">${cliOptions}</select>
-        <button type="button" class="cli-refresh-btn" style="font-size:0.7rem;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 0;margin-left:8px;" title="Refresh CLI status">Refresh</button>
-        ${notInstalledWarning}
-      </div>
-      <div class="step-editor-row">
-        <label>Model Mode</label>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;">
-            <input type="radio" name="model-mode-${index}" value="default" ${!isAdvanced ? 'checked' : ''} class="model-mode-radio" />
-            <span>Dropdown</span>
-          </label>
-          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;">
-            <input type="radio" name="model-mode-${index}" value="advanced" ${isAdvanced ? 'checked' : ''} class="model-mode-radio" />
-            <span>Advanced</span>
-          </label>
-        </div>
-      </div>
-      <div class="cli-default-model-section" style="${defaultModeStyle}">
-        <div class="step-editor-row cli-provider-row" style="${opencodeProviderRow}"><label>Provider</label>
-          <select data-field="provider" class="cli-provider-select">${providerOptions}</select>
-        </div>
-        <div class="step-editor-row"><label>Model</label>
-          <select data-field="model" class="cli-model-select">${modelOptions}</select>
-        </div>
-      </div>
-      <div class="cli-advanced-section" style="${advancedModeStyle}">
-        <div class="step-editor-row"><label>Custom Model Args</label>
-          <input data-field="model_args" value="${escapeHtml(currentModelArgs)}" placeholder="e.g. --model sonnet --effort high" />
-          <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:4px;">Additional CLI arguments for model selection. Overrides dropdown settings.</div>
-        </div>
-      </div>
-      <div class="step-editor-row"><label>Prompt</label><textarea data-field="prompt" rows="3" placeholder="Instructions for the agent...">${escapeHtml(step.config?.prompt || '')}</textarea></div>
-      <div class="step-editor-row"><label>Working Directory</label><input data-field="working_directory" value="${escapeHtml(step.config?.working_directory || '')}" placeholder="~/Projects/my-repo (optional)" /></div>
-      <div class="step-editor-row"><label>Timeout (sec)</label><input data-field="timeout_secs" type="number" value="${step.config?.timeout_secs || 300}" min="10" max="3600" /></div>
-      <div class="cli-command-preview" style="background:var(--bg-input);border-radius:6px;padding:8px 12px;font-family:monospace;font-size:0.8rem;margin-top:8px;color:var(--text-secondary);">
-        <span class="cli-preview-label">Command preview:</span>
-        <code class="cli-preview-cmd" style="display:block;margin-top:4px;word-break:break-all;"></code>
-      </div>
-    `;
-  } else if (step.connector === 'mcp') {
-    configFields = `
-      <div class="step-editor-row"><label>URL</label><input data-field="url" value="${escapeHtml(step.config?.url || '')}" placeholder="https://mcp.example.com" /></div>
-      <div class="step-editor-row"><label>Tool</label><input data-field="tool" value="${escapeHtml(step.config?.tool || '')}" placeholder="e.g. send-message" /></div>
-      <div class="step-editor-row"><label>Args</label><textarea data-field="args" rows="2" placeholder='{"channel": "#team"}'>${escapeHtml(step.config?.args ? JSON.stringify(step.config.args, null, 2) : '')}</textarea></div>
-    `;
-  } else if (step.connector === 'notion') {
-    // Build Notion integration options from notionProfiles (loaded by integrations-settings.js)
-    const profiles = (typeof notionProfiles !== 'undefined') ? notionProfiles : [];
-    const notionOptions = profiles.map(p =>
-      `<option value="${escapeHtml(p.id)}" ${step.config?.integration_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.database_name || 'No DB')})</option>`
-    ).join('');
-
-    if (profiles.length === 0) {
-      configFields = `
-        <div class="step-editor-row" style="color: var(--text-secondary); font-size: 0.85rem;">No Notion integrations connected. Add one in Settings &gt; Integrations.</div>
-      `;
-    } else {
-      configFields = `
-        <div class="step-editor-row"><label>Integration</label><select data-field="integration_id">
-          <option value="">Select Notion database...</option>
-          ${notionOptions}
-        </select></div>
-        <div class="step-editor-row">
-          <button class="mini-action-btn resync-notion-schema-btn" style="font-size: 0.8rem;">Re-sync Schema</button>
-          <span class="resync-status" style="font-size: 0.8rem; color: var(--text-secondary); margin-left: 8px;"></span>
-        </div>
-      `;
-    }
-  } else if (step.connector === 'linear') {
-    // Build Linear integration options from linearProfiles (loaded by integrations-settings.js)
-    const linProfiles = (typeof linearProfiles !== 'undefined') ? linearProfiles : [];
-    const linearOptions = linProfiles.map(p =>
-      `<option value="${escapeHtml(p.id)}" ${step.config?.integration_id === p.id ? 'selected' : ''}>${escapeHtml(p.name)} (${escapeHtml(p.team_name || 'No team')})</option>`
-    ).join('');
-
-    if (linProfiles.length === 0) {
-      configFields = `
-        <div class="step-editor-row" style="color: var(--text-secondary); font-size: 0.85rem;">No Linear integrations connected. Add one in Settings &gt; Integrations.</div>
-      `;
-    } else {
-      configFields = `
-        <div class="step-editor-row"><label>Integration</label><select data-field="integration_id">
-          <option value="">Select Linear team...</option>
-          ${linearOptions}
-        </select></div>
-        <div class="step-editor-row">
-          <button class="mini-action-btn resync-linear-schema-btn" style="font-size: 0.8rem;">Re-sync Schema</button>
-          <span class="resync-status" style="font-size: 0.8rem; color: var(--text-secondary); margin-left: 8px;"></span>
-        </div>
-      `;
-    }
+    hasDelivery = true;
+  }
+  // For unsupported legacy connectors, default to model tool
+  if (!['llm', 'cli_agent', 'slack', ''].includes(step.connector) && step.connector) {
+    toolType = 'model';
   }
 
-  // Update editing index and re-render chips to show active state
-  editingStepIndex = index;
-  renderPipelineSteps();
+  // --- CLI data ---
+  const cliInfo = cliAvailabilityCache || FALLBACK_CLI_INFO;
+  const currentCliId = step.config?.cli || cliInfo.find(c => c.installed)?.id || 'claude';
+  const cliOptions = cliInfo.map(cli => {
+    const icon = cli.installed ? '\u2713' : '\u2717';
+    return `<option value="${escapeHtml(cli.id)}" ${currentCliId === cli.id ? 'selected' : ''}>${escapeHtml(cli.name)} ${icon}</option>`;
+  }).join('');
+  const selectedCli = cliInfo.find(c => c.id === currentCliId);
+  const cliModels = selectedCli?.models || [];
+  const currentCliModel = step.config?.model || '';
+  const cliModelOpts = (cliModels.length > 0
+    ? '<option value="">Default</option>' + cliModels.map(m => `<option value="${escapeHtml(m.id)}" ${currentCliModel === m.id ? 'selected' : ''}>${escapeHtml(m.name)}</option>`).join('')
+    : '<option value="">Default</option>');
 
-  // Build editor into the panel below chips
-  const editorEl = document.createElement('div');
-  editorEl.className = 'step-editor';
-  editorEl.innerHTML = `
-    <div class="step-editor-header">
-      <span class="step-editor-title">Step ${index + 1} — ${escapeHtml(step.name || 'Unnamed')}</span>
-      <button class="step-editor-close" title="Close editor">×</button>
-    </div>
-    <div id="step-config-fields">
-      <div class="step-editor-row"><label>Step Name</label><input class="step-name-input" value="${escapeHtml(step.name || '')}" placeholder="Step name" /></div>
-      ${configFields}
-      ${index > 0 ? (() => {
-        const currentInput = step.input || 'transcript';
-        const inputOptions = ['transcript', ...pipelineEditorSteps.slice(0, index).map(s => s.name).filter(Boolean)]
-          .map(v => `<option value="${escapeHtml(v)}" ${currentInput === v ? 'selected' : ''}>${escapeHtml(v === 'transcript' ? 'Transcript' : v)}</option>`)
-          .join('');
-        return `<div class="step-editor-row"><label>Input</label><select class="step-input-select">${inputOptions}</select></div>`;
-      })() : ''}
-    </div>
-    <div class="step-editor-actions">
-      <button class="step-editor-done">Done</button>
+  // --- LLM Model data ---
+  const currentProvider = step.config?.provider || 'openai';
+  const currentModel = step.config?.model || '';
+  const expanded = modelSelectExpanded[currentProvider] || false;
+  const modelResult = buildModelOptions(currentProvider, currentModel, expanded);
+  const toggleBtn = modelResult.hasMore
+    ? `<button type="button" class="model-select-toggle" data-provider="${escapeHtml(currentProvider)}" style="font-size:0.68rem;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 0;margin-top:2px;">Show all ${modelResult.total}</button>`
+    : (expanded && modelResult.total > 4 ? `<button type="button" class="model-select-toggle" data-provider="${escapeHtml(currentProvider)}" style="font-size:0.68rem;color:var(--text-secondary);background:none;border:none;cursor:pointer;padding:2px 0;margin-top:2px;">Show less</button>` : '');
+
+  // --- Prompt data ---
+  const promptTemplates = (typeof allPromptTemplates !== 'undefined') ? allPromptTemplates : [];
+  const promptTemplateOptions = promptTemplates.map(t =>
+    `<option value="${escapeHtml(t.name)}" ${step.config?.prompt_template === t.name ? 'selected' : ''}>${escapeHtml(t.name)}</option>`
+  ).join('');
+  const isInlinePrompt = !!(step.config?.prompt_inline || step.config?.prompt);
+  const promptText = step.config?.prompt_inline || step.config?.prompt || '';
+
+  // --- Slack data ---
+  const slackEntries = Object.entries(typeof slackIntegrations !== 'undefined' ? slackIntegrations : {});
+  const hasSlack = slackEntries.length > 0;
+  const slackWsOptions = slackEntries.map(([id, data]) =>
+    `<option value="${escapeHtml(id)}" ${step.config?.integration_id === id ? 'selected' : ''}>${escapeHtml(data.name)}</option>`
+  ).join('');
+
+  // --- Build unified editor HTML ---
+  const editorHTML = `
+    <div class="step-editor">
+      <div class="step-editor-header">
+        <span class="step-editor-title">Step ${index + 1}</span>
+        <button class="step-editor-close" title="Close">\u00d7</button>
+      </div>
+
+      <div class="step-section">
+        <div class="step-section-label">Tool</div>
+        <div style="display:flex;gap:12px;margin-bottom:8px;">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;">
+            <input type="radio" name="tool-type-${index}" value="none" ${toolType === 'none' ? 'checked' : ''} class="tool-type-radio" /> None
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;">
+            <input type="radio" name="tool-type-${index}" value="cli" ${toolType === 'cli' ? 'checked' : ''} class="tool-type-radio" /> CLI
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;font-size:0.85rem;">
+            <input type="radio" name="tool-type-${index}" value="model" ${toolType === 'model' ? 'checked' : ''} class="tool-type-radio" /> Model
+          </label>
+        </div>
+        <div class="tool-cli-section" style="display:${toolType === 'cli' ? 'flex' : 'none'};flex-direction:column;gap:8px;">
+          <div class="step-editor-row"><label>CLI</label><select class="cli-select">${cliOptions}</select></div>
+          <div class="step-editor-row"><label>Model</label><select class="cli-model-select">${cliModelOpts}</select></div>
+        </div>
+        <div class="tool-model-section" style="display:${toolType === 'model' ? 'flex' : 'none'};flex-direction:column;gap:8px;">
+          <div class="step-editor-row"><label>Provider</label><select class="llm-provider-select">
+            <option value="openai" ${currentProvider === 'openai' ? 'selected' : ''}>OpenAI</option>
+            <option value="google" ${currentProvider === 'google' ? 'selected' : ''}>Google</option>
+            <option value="anthropic" ${currentProvider === 'anthropic' ? 'selected' : ''}>Anthropic</option>
+            <option value="local" ${currentProvider === 'local' ? 'selected' : ''}>Local LLM</option>
+            <option value="ollama" ${currentProvider === 'ollama' ? 'selected' : ''}>Ollama</option>
+          </select></div>
+          <div class="step-editor-row"><label>Model</label><div><select class="llm-model-select">${modelResult.html}</select>${toggleBtn}</div></div>
+        </div>
+      </div>
+
+      <div class="step-section" style="border-top:1px solid var(--border-color);padding-top:12px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" class="prompt-toggle" ${hasPrompt ? 'checked' : ''} />
+          <span class="step-section-label" style="margin:0;">Prompt</span>
+        </label>
+        <div class="prompt-body" style="display:${hasPrompt ? 'flex' : 'none'};flex-direction:column;gap:8px;margin-top:8px;">
+          <div class="step-editor-row">
+            <select class="prompt-source-select" style="max-width:140px;">
+              <option value="template" ${!isInlinePrompt ? 'selected' : ''}>Template</option>
+              <option value="inline" ${isInlinePrompt ? 'selected' : ''}>Custom</option>
+            </select>
+          </div>
+          <div class="prompt-template-row" style="display:${isInlinePrompt ? 'none' : ''};">
+            <select class="prompt-template-select"><option value="">Select template...</option>${promptTemplateOptions}</select>
+          </div>
+          <div class="prompt-inline-row" style="display:${isInlinePrompt ? '' : 'none'};">
+            <textarea class="prompt-inline-textarea" rows="3" placeholder="Write your prompt. Use {transcript} for input.">${escapeHtml(promptText)}</textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="step-section" style="border-top:1px solid var(--border-color);padding-top:12px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" class="delivery-toggle" ${hasDelivery ? 'checked' : ''} ${!hasSlack ? 'disabled' : ''} />
+          <span class="step-section-label" style="margin:0;">Delivery</span>
+          ${!hasSlack ? '<span style="font-size:0.75rem;color:var(--text-secondary);">(no Slack connected)</span>' : ''}
+        </label>
+        <div class="delivery-body" style="display:${hasDelivery && hasSlack ? 'flex' : 'none'};flex-direction:column;gap:8px;margin-top:8px;">
+          ${slackEntries.length > 1 ? `<div class="step-editor-row"><label>Workspace</label><select class="slack-workspace-select"><option value="">Select...</option>${slackWsOptions}</select></div>` : ''}
+          <div class="step-editor-row"><label>Channel</label>
+            <select class="slack-target-select"><option value="">Select channel or person...</option></select>
+            <div class="slack-target-loading" style="display:none;font-size:0.8rem;color:var(--text-secondary);margin-top:4px;">Loading...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step-section" style="border-top:1px solid var(--border-color);padding-top:12px;">
+        <div class="step-editor-row"><label>Name</label><input class="step-name-input" value="${escapeHtml(step.name || '')}" placeholder="Auto-generated" /></div>
+      </div>
+
+      <div class="step-editor-actions">
+        <button class="step-editor-done">Done</button>
+      </div>
     </div>
   `;
 
-  stepEditorPanelEl.innerHTML = '';
-  stepEditorPanelEl.appendChild(editorEl);
+  editingStepIndex = index;
+  renderPipelineSteps();
+
+  stepEditorPanelEl.innerHTML = editorHTML;
   stepEditorPanelEl.style.display = 'block';
+  const editorEl = stepEditorPanelEl.querySelector('.step-editor');
   setTimeout(() => editorEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
 
-  // Close button
+  // --- Wire: Close ---
   editorEl.querySelector('.step-editor-close').addEventListener('click', () => {
+    // If step has no connector set (brand new, user cancelled), remove it
+    if (!step.name && !step.config?.cli && !step.config?.provider && !step.config?.integration_id) {
+      pipelineEditorSteps.splice(index, 1);
+    }
     editingStepIndex = null;
     closeStepEditorPanel();
     renderPipelineSteps();
+    maybeAutoName();
   });
 
-  // Re-sync Schema button handler (Notion only, wired after editor is in DOM)
-  if (step.connector === 'notion') {
-    const resyncBtn = editorEl.querySelector('.resync-notion-schema-btn');
-    if (resyncBtn) {
-      resyncBtn.addEventListener('click', async () => {
-        // Get currently selected integration_id from the dropdown
-        const integrationSelect = editorEl.querySelector('[data-field="integration_id"]');
-        const integrationId = integrationSelect ? integrationSelect.value : '';
-        if (!integrationId) {
-          const statusSpan = editorEl.querySelector('.resync-status');
-          if (statusSpan) statusSpan.textContent = 'Select an integration first';
-          return;
-        }
+  // --- Wire: Tool radio ---
+  editorEl.querySelectorAll('.tool-type-radio').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const val = radio.value;
+      editorEl.querySelector('.tool-cli-section').style.display = val === 'cli' ? 'flex' : 'none';
+      editorEl.querySelector('.tool-model-section').style.display = val === 'model' ? 'flex' : 'none';
+    });
+  });
 
-        // Find the profile to get database_id and database_name
-        const profiles = (typeof notionProfiles !== 'undefined') ? notionProfiles : [];
-        const profile = profiles.find(p => p.id === integrationId);
-        if (!profile || !profile.database_id) {
-          const statusSpan = editorEl.querySelector('.resync-status');
-          if (statusSpan) statusSpan.textContent = 'No database synced for this integration';
-          return;
-        }
-
-        resyncBtn.disabled = true;
-        resyncBtn.textContent = 'Syncing...';
-        const statusSpan = editorEl.querySelector('.resync-status');
-        if (statusSpan) statusSpan.textContent = '';
-
-        try {
-          const updatedProfile = await window.__TAURI__.core.invoke('sync_notion_schema', {
-            integrationId: integrationId,
-            databaseId: profile.database_id,
-            databaseName: profile.database_name,
-          });
-
-          // Update the notionProfiles global so other UI stays current
-          const idx = notionProfiles.findIndex(p => p.id === integrationId);
-          if (idx >= 0) {
-            notionProfiles[idx] = updatedProfile;
-          }
-
-          resyncBtn.textContent = 'Re-sync Schema';
-          resyncBtn.disabled = false;
-          if (statusSpan) {
-            statusSpan.style.color = 'var(--text-secondary)';
-            statusSpan.textContent = 'Schema synced successfully';
-          }
-        } catch (err) {
-          resyncBtn.textContent = 'Re-sync Schema';
-          resyncBtn.disabled = false;
-          if (statusSpan) {
-            statusSpan.style.color = '#e6453d';
-            statusSpan.textContent = 'Sync failed: ' + String(err);
-          }
-        }
-      });
-    }
+  // --- Wire: CLI select → update model dropdown ---
+  const cliSelect = editorEl.querySelector('.cli-select');
+  if (cliSelect) {
+    cliSelect.addEventListener('change', () => {
+      const selCli = cliInfo.find(c => c.id === cliSelect.value);
+      const modelSel = editorEl.querySelector('.cli-model-select');
+      if (!modelSel || !selCli) return;
+      const models = selCli.models || [];
+      modelSel.innerHTML = '<option value="">Default</option>' +
+        models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`).join('');
+    });
   }
 
-  // Re-sync Schema button handler (Linear only, wired after editor is in DOM)
-  if (step.connector === 'linear') {
-    const resyncBtn = editorEl.querySelector('.resync-linear-schema-btn');
-    if (resyncBtn) {
-      resyncBtn.addEventListener('click', async () => {
-        const integrationSelect = editorEl.querySelector('[data-field="integration_id"]');
-        const integrationId = integrationSelect ? integrationSelect.value : '';
-        if (!integrationId) {
-          const statusSpan = editorEl.querySelector('.resync-status');
-          if (statusSpan) statusSpan.textContent = 'Select an integration first';
-          return;
-        }
-
-        const linProfiles = (typeof linearProfiles !== 'undefined') ? linearProfiles : [];
-        const profile = linProfiles.find(p => p.id === integrationId);
-        if (!profile || !profile.team_id) {
-          const statusSpan = editorEl.querySelector('.resync-status');
-          if (statusSpan) statusSpan.textContent = 'No team synced for this integration';
-          return;
-        }
-
-        resyncBtn.disabled = true;
-        resyncBtn.textContent = 'Syncing...';
-        const statusSpan = editorEl.querySelector('.resync-status');
-        if (statusSpan) statusSpan.textContent = '';
-
-        try {
-          const updatedProfile = await window.__TAURI__.core.invoke('sync_linear_schema', {
-            integrationId: integrationId,
-            teamId: profile.team_id,
-            teamName: profile.team_name,
-          });
-
-          // Update the linearProfiles global
-          const idx = linearProfiles.findIndex(p => p.id === integrationId);
-          if (idx >= 0) {
-            linearProfiles[idx] = updatedProfile;
-          }
-
-          resyncBtn.textContent = 'Re-sync Schema';
-          resyncBtn.disabled = false;
-          if (statusSpan) {
-            statusSpan.style.color = 'var(--text-secondary)';
-            statusSpan.textContent = 'Schema synced successfully';
-          }
-        } catch (err) {
-          resyncBtn.textContent = 'Re-sync Schema';
-          resyncBtn.disabled = false;
-          if (statusSpan) {
-            statusSpan.style.color = '#e6453d';
-            statusSpan.textContent = 'Sync failed: ' + String(err);
-          }
-        }
-      });
-    }
+  // --- Wire: LLM provider → update model dropdown ---
+  const llmProviderSel = editorEl.querySelector('.llm-provider-select');
+  if (llmProviderSel) {
+    llmProviderSel.addEventListener('change', () => {
+      const prov = llmProviderSel.value;
+      const modelSel = editorEl.querySelector('.llm-model-select');
+      if (!modelSel) return;
+      const exp = modelSelectExpanded[prov] || false;
+      const res = buildModelOptions(prov, '', exp);
+      modelSel.innerHTML = res.html;
+      const tb = editorEl.querySelector('.model-select-toggle');
+      if (tb) {
+        tb.dataset.provider = prov;
+        tb.style.display = res.hasMore || (exp && res.total > 4) ? '' : 'none';
+        tb.textContent = res.hasMore ? `Show all ${res.total}` : 'Show less';
+      }
+    });
   }
 
-  // Slack workspace change → fetch channels + members for target dropdown
-  if (step.connector === 'slack') {
+  // --- Wire: Model toggle ---
+  const modelToggle = editorEl.querySelector('.model-select-toggle');
+  if (modelToggle) {
+    modelToggle.addEventListener('click', () => {
+      const prov = modelToggle.dataset.provider;
+      modelSelectExpanded[prov] = !modelSelectExpanded[prov];
+      const modelSel = editorEl.querySelector('.llm-model-select');
+      if (!modelSel) return;
+      const res = buildModelOptions(prov, modelSel.value, modelSelectExpanded[prov]);
+      modelSel.innerHTML = res.html;
+      modelToggle.textContent = res.hasMore ? `Show all ${res.total}` : 'Show less';
+    });
+  }
+
+  // --- Wire: Prompt toggle ---
+  const promptToggle = editorEl.querySelector('.prompt-toggle');
+  const promptBody = editorEl.querySelector('.prompt-body');
+  if (promptToggle && promptBody) {
+    promptToggle.addEventListener('change', () => {
+      promptBody.style.display = promptToggle.checked ? 'flex' : 'none';
+    });
+  }
+
+  // --- Wire: Prompt source (template vs custom) ---
+  const promptSourceSel = editorEl.querySelector('.prompt-source-select');
+  if (promptSourceSel) {
+    promptSourceSel.addEventListener('change', () => {
+      const isInline = promptSourceSel.value === 'inline';
+      editorEl.querySelector('.prompt-template-row').style.display = isInline ? 'none' : '';
+      editorEl.querySelector('.prompt-inline-row').style.display = isInline ? '' : 'none';
+    });
+  }
+
+  // --- Wire: Delivery toggle ---
+  const deliveryToggle = editorEl.querySelector('.delivery-toggle');
+  const deliveryBody = editorEl.querySelector('.delivery-body');
+  if (deliveryToggle && deliveryBody) {
+    deliveryToggle.addEventListener('change', () => {
+      deliveryBody.style.display = deliveryToggle.checked ? 'flex' : 'none';
+      if (deliveryToggle.checked) loadSlackTargets();
+    });
+  }
+
+  // --- Wire: Slack channel loading ---
+  async function loadSlackTargets(wsId) {
     const wsSelect = editorEl.querySelector('.slack-workspace-select');
     const targetSelect = editorEl.querySelector('.slack-target-select');
     const loadingEl = editorEl.querySelector('.slack-target-loading');
-    const customRow = editorEl.querySelector('.slack-custom-target-row');
+    if (!targetSelect) return;
 
-    async function populateSlackTargets(integrationId) {
-      if (!integrationId) {
-        targetSelect.innerHTML = '<option value="">Select channel or person...</option>';
-        customRow.style.display = 'none';
-        return;
-      }
-      // Always fetch fresh channels & members — don't disable dropdown
-      loadingEl.style.display = 'block';
-      try {
-        const [channels, members] = await Promise.all([
-          invoke('list_slack_channels', { integrationId }),
-          invoke('list_slack_members', { integrationId })
-        ]);
-        renderSlackTargetOptions({ channels, members }, targetSelect, step.config?.target, customRow);
-      } catch (err) {
-        targetSelect.innerHTML = `<option value="">Failed to load: ${escapeHtml(String(err))}</option>`;
-      } finally {
-        loadingEl.style.display = 'none';
-      }
-    }
+    const integrationId = wsId || (wsSelect ? wsSelect.value : '') || (slackEntries.length === 1 ? slackEntries[0][0] : '');
+    if (!integrationId) return;
 
-    function renderSlackTargetOptions(data, selectEl, currentValue, customRowEl) {
+    loadingEl && (loadingEl.style.display = 'block');
+    try {
+      const [channels, members] = await Promise.all([
+        invoke('list_slack_channels', { integrationId }),
+        invoke('list_slack_members', { integrationId })
+      ]);
       let opts = '<option value="">Select channel or person...</option>';
-      if (data.channels.length > 0) {
+      if (channels.length > 0) {
         opts += '<optgroup label="Channels">';
-        for (const ch of data.channels) {
+        for (const ch of channels) {
           const prefix = ch.is_private ? '\uD83D\uDD12 ' : '#';
-          const sel = currentValue === ch.id ? ' selected' : '';
+          const sel = step.config?.target === ch.id ? ' selected' : '';
           opts += `<option value="${escapeHtml(ch.id)}"${sel}>${prefix}${escapeHtml(ch.name)}</option>`;
         }
         opts += '</optgroup>';
       }
-      if (data.members.length > 0) {
+      if (members.length > 0) {
         opts += '<optgroup label="People">';
-        for (const m of data.members) {
-          const sel = currentValue === m.id ? ' selected' : '';
+        for (const m of members) {
+          const sel = step.config?.target === m.id ? ' selected' : '';
           opts += `<option value="${escapeHtml(m.id)}"${sel}>${escapeHtml(m.display_name)}</option>`;
         }
         opts += '</optgroup>';
       }
-      opts += '<option value="__custom__">Custom target...</option>';
-      selectEl.innerHTML = opts;
-      // If current value doesn't match any option, select custom
-      if (currentValue && currentValue !== '__custom__' && !selectEl.querySelector(`option[value="${CSS.escape(currentValue)}"]`)) {
-        selectEl.value = '__custom__';
-        customRowEl.style.display = 'block';
-        const customInput = customRowEl.querySelector('[data-field="target_custom"]');
-        if (customInput) customInput.value = currentValue;
-      }
+      targetSelect.innerHTML = opts;
+    } catch (err) {
+      targetSelect.innerHTML = `<option value="">Failed: ${escapeHtml(String(err))}</option>`;
+    } finally {
+      loadingEl && (loadingEl.style.display = 'none');
     }
-
-    // Pre-select workspace dropdown if already configured or only one exists
-    const wsIds = Object.keys(slackIntegrations);
-    if (!step.config?.integration_id && wsIds.length === 1) {
-      wsSelect.value = wsIds[0];
-      step.config = step.config || {};
-      step.config.integration_id = wsIds[0];
-    } else if (step.config?.integration_id && wsSelect) {
-      wsSelect.value = step.config.integration_id;
-    }
-    // Fetch fresh targets immediately when step editor opens
-    if (wsSelect.value) {
-      populateSlackTargets(wsSelect.value);
-    }
-    targetSelect.addEventListener('change', () => {
-      if (targetSelect.value === '__custom__') {
-        customRow.style.display = 'block';
-      } else {
-        customRow.style.display = 'none';
-      }
-    });
-    const handleWsChange = () => {
-      customRow.style.display = 'none';
-      populateSlackTargets(wsSelect.value);
-    };
-    wsSelect.addEventListener('change', handleWsChange);
   }
 
-  // LLM provider change → update model dropdown
-  const llmProviderSelect = editorEl.querySelector('.llm-provider-select');
-  if (llmProviderSelect) {
-    llmProviderSelect.addEventListener('change', () => {
-      const newProvider = llmProviderSelect.value;
-      const modelSelect = editorEl.querySelector('.llm-model-select');
-      if (!modelSelect) return;
-      const expanded = modelSelectExpanded[newProvider] || false;
-      const modelResult = buildModelOptions(newProvider, '', expanded);
-      modelSelect.innerHTML = modelResult.html;
-      const toggleBtn = editorEl.querySelector('.model-select-toggle');
-      if (toggleBtn) {
-        toggleBtn.dataset.provider = newProvider;
-        if (modelResult.hasMore) {
-          toggleBtn.textContent = `Show all ${modelResult.total} models`;
-          toggleBtn.style.display = '';
-        } else if (expanded && modelResult.total > 4) {
-          toggleBtn.textContent = 'Show less';
-          toggleBtn.style.display = '';
-        } else {
-          toggleBtn.style.display = 'none';
-        }
-      }
-    });
-  }
+  const wsSelect = editorEl.querySelector('.slack-workspace-select');
+  if (wsSelect) wsSelect.addEventListener('change', () => loadSlackTargets(wsSelect.value));
+  // Auto-load if delivery is checked
+  if (hasDelivery && hasSlack) loadSlackTargets();
 
-  // Model select toggle button → show all / show less
-  const modelToggleBtn = editorEl.querySelector('.model-select-toggle');
-  if (modelToggleBtn) {
-    modelToggleBtn.addEventListener('click', () => {
-      const provider = modelToggleBtn.dataset.provider;
-      modelSelectExpanded[provider] = !modelSelectExpanded[provider];
-      const modelSelect = editorEl.querySelector('.llm-model-select');
-      if (!modelSelect) return;
-      const currentModel = modelSelect.value;
-      const expanded = modelSelectExpanded[provider];
-      const modelResult = buildModelOptions(provider, currentModel, expanded);
-      modelSelect.innerHTML = modelResult.html;
-      if (modelResult.hasMore) {
-        modelToggleBtn.textContent = `Show all ${modelResult.total} models`;
-      } else if (expanded && modelResult.total > 4) {
-        modelToggleBtn.textContent = 'Show less';
-      }
-    });
-  }
-
-  // CLI select change → update warning message and model dropdown
-  const cliSelect = editorEl.querySelector('.cli-select');
-  if (cliSelect) {
-    cliSelect.addEventListener('change', async () => {
-      const selectedCliId = cliSelect.value;
-      const cliInfo = cliAvailabilityCache || [];
-      const selectedCli = cliInfo.find(c => c.id === selectedCliId);
-      const warningEl = editorEl.querySelector('.cli-not-installed-warning');
-      if (warningEl) {
-        if (selectedCli && !selectedCli.installed) {
-          warningEl.innerHTML = `⚠️ ${escapeHtml(selectedCli.name)} is not installed. Install: <code style="background: var(--bg-input); padding: 2px 6px; border-radius: 4px;">${escapeHtml(selectedCli.install_hint)}</code>`;
-        } else {
-          warningEl.remove();
-        }
-      } else if (selectedCli && !selectedCli.installed) {
-        const parentRow = cliSelect.closest('.step-editor-row');
-        if (parentRow) {
-          const newWarning = document.createElement('div');
-          newWarning.className = 'cli-not-installed-warning';
-          newWarning.style.cssText = 'color: #e6453d; font-size: 0.8rem; margin-top: 4px;';
-          newWarning.innerHTML = `⚠️ ${escapeHtml(selectedCli.name)} is not installed. Install: <code style="background: var(--bg-input); padding: 2px 6px; border-radius: 4px;">${escapeHtml(selectedCli.install_hint)}</code>`;
-          parentRow.appendChild(newWarning);
-        }
-      }
-      const modelSelect = editorEl.querySelector('.cli-model-select');
-      if (modelSelect && selectedCli) {
-        const models = selectedCli.models || [];
-        modelSelect.innerHTML = models.length > 0
-          ? models.map(m => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`).join('')
-          : '<option value="">No models available</option>';
-      }
-      const providerRow = editorEl.querySelector('.cli-provider-row');
-      if (providerRow) {
-        providerRow.style.display = selectedCliId === 'opencode' ? '' : 'none';
-      }
-      const providerSelect = editorEl.querySelector('.cli-provider-select');
-      if (providerSelect && selectedCli) {
-        const providers = selectedCli.providers || [];
-        providerSelect.innerHTML = providers.length > 0
-          ? '<option value="">Auto-detect</option>' + providers.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('')
-          : '';
-      }
-      updateCliPreview(editorEl);
-    });
-    cliSelect.addEventListener('change', () => updateCliPreview(editorEl));
-  }
-
-  // Model mode radio buttons
-  const modelModeRadios = editorEl.querySelectorAll('.model-mode-radio');
-  modelModeRadios.forEach(radio => {
-    radio.addEventListener('change', () => {
-      const isAdvanced = radio.value === 'advanced';
-      const defaultSection = editorEl.querySelector('.cli-default-model-section');
-      const advancedSection = editorEl.querySelector('.cli-advanced-section');
-      if (defaultSection) defaultSection.style.display = isAdvanced ? 'none' : '';
-      if (advancedSection) advancedSection.style.display = isAdvanced ? '' : 'none';
-      updateCliPreview(editorEl);
-    });
-  });
-
-  // Model/provider/args change → update preview
-  const modelSelect = editorEl.querySelector('.cli-model-select');
-  const providerSelect = editorEl.querySelector('.cli-provider-select');
-  const modelArgsInput = editorEl.querySelector('[data-field="model_args"]');
-  if (modelSelect) modelSelect.addEventListener('change', () => updateCliPreview(editorEl));
-  if (providerSelect) providerSelect.addEventListener('change', () => updateCliPreview(editorEl));
-  if (modelArgsInput) modelArgsInput.addEventListener('input', () => updateCliPreview(editorEl));
-
-  function updateCliPreview(editorEl) {
-    const cliVal = editorEl.querySelector('.cli-select')?.value || 'claude';
-    const modeRadio = editorEl.querySelector('.model-mode-radio:checked');
-    const isAdvanced = modeRadio?.value === 'advanced';
-    const modelVal = editorEl.querySelector('.cli-model-select')?.value || '';
-    const providerVal = editorEl.querySelector('.cli-provider-select')?.value || '';
-    const argsVal = editorEl.querySelector('[data-field="model_args"]')?.value || '';
-    const previewCmd = editorEl.querySelector('.cli-preview-cmd');
-    if (!previewCmd) return;
-    let cmd = cliVal;
-    if (cliVal === 'claude') {
-      cmd += ' -p "<prompt>"';
-      if (isAdvanced && argsVal) {
-        cmd += ' ' + argsVal;
-      } else if (modelVal) {
-        cmd += ' --model ' + modelVal;
-      }
-    } else if (cliVal === 'codex') {
-      cmd += ' exec "<prompt>"';
-      if (isAdvanced && argsVal) {
-        cmd += ' ' + argsVal;
-      } else if (modelVal) {
-        cmd += ' -m ' + modelVal;
-      }
-    } else if (cliVal === 'opencode') {
-      cmd += ' run "<prompt>"';
-      if (isAdvanced && argsVal) {
-        cmd += ' ' + argsVal;
-      } else if (modelVal) {
-        const fullModel = modelVal.includes('/') ? modelVal : (providerVal ? `${providerVal}/${modelVal}` : modelVal);
-        cmd += ' -m ' + fullModel;
-      }
-    }
-    previewCmd.textContent = cmd;
-  }
-  updateCliPreview(editorEl);
-
-  // CLI refresh button → reload CLI availability
-  const cliRefreshBtn = editorEl.querySelector('.cli-refresh-btn');
-  if (cliRefreshBtn) {
-    cliRefreshBtn.addEventListener('click', async () => {
-      cliRefreshBtn.textContent = 'Refreshing...';
-      cliRefreshBtn.disabled = true;
-      await refreshCliAvailability();
-      cliRefreshBtn.textContent = 'Refresh';
-      cliRefreshBtn.disabled = false;
-      // Re-render the editor to update the dropdown
-      showStepEditor(index);
-    });
-  }
-
-  // Done button — save and collapse panel
+  // --- Wire: Done ---
   editorEl.querySelector('.step-editor-done').addEventListener('click', () => {
-    const configFieldsEl = editorEl.querySelector('#step-config-fields');
-    const prevTarget = step.config?.target;
-    step.config = {};
-    const modelModeRadio = editorEl.querySelector('.model-mode-radio:checked');
-    const modelMode = modelModeRadio ? modelModeRadio.value : 'default';
-    if (step.connector === 'cli_agent' && modelMode) step.config.model_mode = modelMode;
-    configFieldsEl.querySelectorAll('[data-field]').forEach(field => {
-      const key = field.dataset.field;
-      let val = field.value.trim();
-      if (key === 'args') {
-        try { val = JSON.parse(val); } catch { val = {}; }
-      }
-      if (field.type === 'number' && val !== '') {
-        val = Number(val);
-      }
-      if (key === 'target' && val === '__custom__') return;
-      if (key === 'target_custom') {
-        const targetSel = configFieldsEl.querySelector('[data-field="target"]');
-        if (targetSel && targetSel.value === '__custom__' && val !== '') {
-          step.config.target = val;
-        }
-        return;
-      }
-      if (key === 'model_args' && modelMode === 'default') return;
-      if ((key === 'model' || key === 'provider') && modelMode === 'advanced') return;
-      if (val !== '') step.config[key] = val;
-    });
-    // Validate CLI availability before saving
-    if (step.connector === 'cli_agent' && step.config.cli) {
-      const cliInfo = cliAvailabilityCache || [];
-      const selectedCli = cliInfo.find(c => c.id === step.config.cli);
-      if (selectedCli && !selectedCli.installed) {
-        showToast(`${selectedCli.name} is not installed. Install it first: ${selectedCli.install_hint}`, 'error');
-        return;
-      }
-    }
-    // If Slack target dropdown was empty (async not loaded yet), restore previous value
-    if (step.connector === 'slack' && !step.config.target && prevTarget) {
-      step.config.target = prevTarget;
-    }
-    // Use explicit step name from input, fall back to auto-derive for llm steps
+    const tool = editorEl.querySelector('.tool-type-radio:checked')?.value || 'none';
+    const promptOn = editorEl.querySelector('.prompt-toggle')?.checked;
+    const deliveryOn = editorEl.querySelector('.delivery-toggle')?.checked;
     const nameInput = editorEl.querySelector('.step-name-input');
     const nameVal = nameInput ? nameInput.value.trim() : '';
-    if (nameVal) {
-      step.name = nameVal;
-    } else if (step.connector === 'llm' && step.config.prompt_template) {
-      step.name = step.config.prompt_template;
+
+    // Build processing step (CLI or Model)
+    if (tool === 'cli') {
+      step.connector = 'cli_agent';
+      step.config = {
+        cli: editorEl.querySelector('.cli-select')?.value || 'claude',
+        timeout_secs: 300,
+      };
+      const cliModel = editorEl.querySelector('.cli-model-select')?.value;
+      if (cliModel) step.config.model = cliModel;
+      if (promptOn) {
+        const src = editorEl.querySelector('.prompt-source-select')?.value;
+        if (src === 'inline') {
+          step.config.prompt = editorEl.querySelector('.prompt-inline-textarea')?.value?.trim() || '';
+        } else {
+          const tmpl = editorEl.querySelector('.prompt-template-select')?.value;
+          if (tmpl) step.config.prompt_template = tmpl;
+        }
+      }
+      step.name = nameVal || ('cli-' + (step.config.cli || 'agent'));
+    } else if (tool === 'model') {
+      step.connector = 'llm';
+      step.config = {
+        provider: editorEl.querySelector('.llm-provider-select')?.value || 'openai',
+        model: editorEl.querySelector('.llm-model-select')?.value || '',
+      };
+      if (promptOn) {
+        const src = editorEl.querySelector('.prompt-source-select')?.value;
+        if (src === 'inline') {
+          step.config.prompt_inline = editorEl.querySelector('.prompt-inline-textarea')?.value?.trim() || '';
+        } else {
+          const tmpl = editorEl.querySelector('.prompt-template-select')?.value;
+          if (tmpl) step.config.prompt_template = tmpl;
+        }
+      }
+      step.name = nameVal || step.config.prompt_template || ('llm-' + step.config.provider);
+    } else if (deliveryOn) {
+      // Delivery-only step
+      step.connector = 'slack';
+      const wsVal = editorEl.querySelector('.slack-workspace-select')?.value || (slackEntries.length === 1 ? slackEntries[0][0] : '');
+      const targetVal = editorEl.querySelector('.slack-target-select')?.value || '';
+      step.config = { integration_id: wsVal, target: targetVal };
+      step.name = nameVal || 'send-to-slack';
+    } else {
+      // Nothing selected — remove the empty step
+      pipelineEditorSteps.splice(index, 1);
+      editingStepIndex = null;
+      closeStepEditorPanel();
+      renderPipelineSteps();
+      return;
     }
-    // Persist user-selected input source (transcript or previous step name)
-    const inputSelect = editorEl.querySelector('.step-input-select');
-    if (inputSelect) {
-      step.input = inputSelect.value || 'transcript';
+
+    // If tool + delivery both selected → auto-add a chained Slack step
+    if (tool !== 'none' && deliveryOn) {
+      const wsVal = editorEl.querySelector('.slack-workspace-select')?.value || (slackEntries.length === 1 ? slackEntries[0][0] : '');
+      const targetVal = editorEl.querySelector('.slack-target-select')?.value || '';
+      const slackStep = {
+        name: 'send-to-slack',
+        connector: 'slack',
+        input: step.name,
+        config: { integration_id: wsVal, target: targetVal },
+      };
+      // Insert after current step (if not already there)
+      const nextStep = pipelineEditorSteps[index + 1];
+      if (!nextStep || nextStep.connector !== 'slack') {
+        pipelineEditorSteps.splice(index + 1, 0, slackStep);
+      } else {
+        // Update existing slack step
+        nextStep.config = slackStep.config;
+        nextStep.input = step.name;
+      }
     }
 
     fixStepInputs();
     editingStepIndex = null;
     closeStepEditorPanel();
     renderPipelineSteps();
+    maybeAutoName();
   });
+
+  // Focus first interactive element
+  const firstRadio = editorEl.querySelector('.tool-type-radio:checked');
+  if (firstRadio) firstRadio.focus();
 }
 
 if (addPipelineDefBtn) addPipelineDefBtn.addEventListener('click', () => openPipelineEditor(null));

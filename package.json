@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "check:js": "node --check src/main.js && node --check src/pipeline-builder.js && node --check src/integrations-settings.js && node --check src/module-loader.js && node --check src/viewManager.js && node --check src/ui-health-check.js",
+    "build:js": "bun esbuild.mjs",
+    "build:js:dev": "bun esbuild.mjs --dev",
+    "check:js": "bun esbuild.mjs",
     "lint": "eslint \"src/**/*.js\" --max-warnings=0",
     "check:all": "bun run lint && bun run check:js && bun run check",
     "doctor": "node scripts/doctor.mjs",
     "doctor:rust": "node scripts/doctor.mjs --rust-only",
-    "dev": "bun run doctor:rust && tauri dev --config src-tauri/tauri.dev.conf.json",
-    "build": "tauri build",
+    "dev": "bun run build:js:dev && bun run doctor:rust && tauri dev --config src-tauri/tauri.dev.conf.json",
+    "build": "bun run build:js && tauri build",
     "tauri": "tauri",
     "build:release": "./build.sh",
     "update-packages": "rustup update && cargo update && bun update",
@@ -20,6 +22,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.10.1",
+    "esbuild": "^0.28.0",
     "eslint": "^10.1.0",
     "globals": "^17.4.0"
   },
