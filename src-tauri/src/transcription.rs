@@ -119,7 +119,6 @@ pub async fn get_whisper_models_info() -> Result<Vec<ModelInfo>, String> {
         let url = get_model_url(&size);
         let filename = url.split('/').last().unwrap().to_string();
         let local_path = models_dir.join(&filename);
-        let downloaded = local_path.exists();
         let path_str = local_path.to_string_lossy().to_string();
 
         let size_mb = match size {
@@ -127,8 +126,14 @@ pub async fn get_whisper_models_info() -> Result<Vec<ModelInfo>, String> {
             WhisperModelSize::Base => 141,
             WhisperModelSize::Small => 465,
             WhisperModelSize::Medium => 1462,
-            WhisperModelSize::Large => 2951, 
+            WhisperModelSize::Large => 2951,
         };
+
+        // Check file exists AND is at least the expected size (not a partial download)
+        let expected_bytes = (size_mb as u64) * 1024 * 1024;
+        let downloaded = local_path.exists() && std::fs::metadata(&local_path)
+            .map(|m| m.len() >= expected_bytes)
+            .unwrap_or(false);
 
         results.push(ModelInfo {
             size,
@@ -174,13 +179,43 @@ pub async fn download_whisper_model(
         .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| e.to_string())?;
-        
-    let res = client.get(&url).send().await.map_err(|e| e.to_string())?;
-    let total_size = res.content_length().unwrap_or(0);
-    
-    let mut file = tokio::fs::File::create(&file_path).await.map_err(|e| e.to_string())?;
+
+    // Check for partial download to resume
+    let existing_len = if file_path.exists() {
+        std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut request = client.get(&url);
+    if existing_len > 0 {
+        request = request.header("Range", format!("bytes={}-", existing_len));
+    }
+
+    let res = request.send().await.map_err(|e| e.to_string())?;
+    let status = res.status();
+
+    let (total_size, mut downloaded, resume) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        // Server supports range — resume
+        let content_len = res.content_length().unwrap_or(0);
+        (existing_len + content_len, existing_len, true)
+    } else {
+        // No range support or fresh download
+        let content_len = res.content_length().unwrap_or(0);
+        (content_len, 0u64, false)
+    };
+
+    let mut file = if resume {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        tokio::fs::File::create(&file_path).await.map_err(|e| e.to_string())?
+    };
+
     let mut stream = res.bytes_stream();
-    let mut downloaded: u64 = 0;
     let mut last_emit = std::time::Instant::now();
 
     while let Some(item) = stream.next().await {

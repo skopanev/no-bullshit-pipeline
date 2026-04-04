@@ -37,7 +37,7 @@ export function showStepEditor(index) {
 
   if (step.connector === 'cli_agent') {
     toolType = 'cli';
-    hasPrompt = !!step.config?.prompt;
+    hasPrompt = !!(step.config?.prompt || step.config?.prompt_template);
   } else if (step.connector === 'llm') {
     toolType = 'model';
     hasPrompt = !!(step.config?.prompt_template || step.config?.prompt_inline);

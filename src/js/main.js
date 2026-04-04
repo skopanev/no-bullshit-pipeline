@@ -48,6 +48,10 @@ window.__nbpLoadPromptTemplates = loadPromptTemplates;
 window.__nbpSwitchSettingsTab = switchSettingsTab;
 window.__nbpRenderModelsProviders = renderModelsProviders;
 
+// Wire record button
+const recordToggleBtn = document.getElementById('record-toggle-btn');
+if (recordToggleBtn) recordToggleBtn.addEventListener('click', toggleRecording);
+
 // Wire cross-module events
 on('tab:pipelines', () => loadPipelineDefs());
 on('tab:prompts', () => loadPromptTemplates());

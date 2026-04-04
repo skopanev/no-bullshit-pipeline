@@ -146,10 +146,22 @@ pub async fn execute(
         ));
     }
 
-    let prompt = config
+    let prompt = if let Some(template_name) = config
+        .get("prompt_template")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        let template = crate::prompt_templates::get_prompt_template_internal(template_name)?;
+        template.prompt.clone()
+    } else if let Some(inline) = config
         .get("prompt")
         .and_then(|v| v.as_str())
-        .ok_or("CLI agent config missing 'prompt'")?;
+        .filter(|s| !s.trim().is_empty())
+    {
+        inline.to_string()
+    } else {
+        return Err("CLI agent config missing 'prompt' or 'prompt_template'".to_string());
+    };
 
     let timeout_secs = config
         .get("timeout_secs")

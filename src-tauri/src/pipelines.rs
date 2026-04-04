@@ -335,14 +335,13 @@ fn validate_step_config(step: &PipelineStep) -> Result<(), String> {
                 }
                 _ => {}
             }
-            match step.config.get("prompt").and_then(|v| v.as_str()) {
-                None | Some("") => {
-                    return Err(format!(
-                        "Step '{}': CLI agent connector requires 'prompt' in config",
-                        step.name
-                    ));
-                }
-                _ => {}
+            let has_prompt = step.config.get("prompt").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+            let has_prompt_template = step.config.get("prompt_template").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+            if !has_prompt && !has_prompt_template {
+                return Err(format!(
+                    "Step '{}': CLI agent connector requires 'prompt' or 'prompt_template' in config",
+                    step.name
+                ));
             }
             let model_mode = step.config.get("model_mode").and_then(|v| v.as_str()).unwrap_or("default");
             if model_mode != "default" && model_mode != "advanced" {

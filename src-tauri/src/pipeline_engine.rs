@@ -16,6 +16,51 @@ lazy_static::lazy_static! {
         std::sync::Mutex::new(HashMap::new());
 }
 
+/// Extract a short title from pipeline step output.
+/// Looks for "## Topic" section content, "**Topic**:" inline, or first meaningful heading.
+fn extract_title_from_output(content: &str) -> Option<String> {
+    // Skip frontmatter
+    let body = if content.starts_with("---") {
+        content.splitn(3, "---").nth(2).unwrap_or(content)
+    } else {
+        content
+    };
+
+    let lines: Vec<&str> = body.lines().collect();
+
+    // Pass 1: Look for "## Topic" section — take the next non-empty line as title
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let heading = trimmed.trim_start_matches('#').trim();
+        if heading.eq_ignore_ascii_case("topic") {
+            // Next non-empty, non-separator line is the title
+            for next_line in lines.iter().skip(i + 1) {
+                let next = next_line.trim();
+                if next.is_empty() || next == "---" { continue; }
+                let title = next.trim_start_matches(|c: char| c == '-' || c == '*' || c == ' ')
+                    .trim_matches(|c: char| c == '*')
+                    .trim();
+                if !title.is_empty() {
+                    return Some(title.chars().take(100).collect());
+                }
+            }
+        }
+
+        // "**Topic**: ..." or "Topic: ..." inline
+        if let Some(rest) = trimmed.strip_prefix("**Topic**:")
+            .or_else(|| trimmed.strip_prefix("**Topic:**"))
+            .or_else(|| trimmed.strip_prefix("Topic:"))
+        {
+            let title = rest.trim().trim_matches(|c: char| c == '*').trim();
+            if !title.is_empty() {
+                return Some(title.chars().take(100).collect());
+            }
+        }
+    }
+
+    None
+}
+
 /// Get the pipeline output directory for a recording
 fn get_pipeline_output_dir(recording_id: &str, pipeline_name: &str, run_index: usize) -> PathBuf {
     let dir_name = if run_index == 0 {
@@ -1124,6 +1169,26 @@ pub async fn execute_pipeline_internal(
         None,
         first_error.as_deref(),
     )?;
+
+    // Auto-title: if recording still has default title, extract one from the first processing step output
+    if final_status == PipelineStatus::Done || final_status == PipelineStatus::Partial {
+        if let Ok(meta) = crate::storage::read_metadata(recording_id) {
+            let needs_title = meta.title.is_empty()
+                || meta.title == "Untitled Recording"
+                || meta.title.starts_with("Recording ");
+            if needs_title {
+                // Find first non-delivery step that succeeded
+                if let Some(step) = pipeline.steps.iter().find(|s| !s.connector.is_delivery() && !failed_or_skipped.contains(&s.name)) {
+                    let step_output = output_dir.join(format!("{}.md", step.name));
+                    if let Ok(content) = fs::read_to_string(&step_output) {
+                        if let Some(title) = extract_title_from_output(&content) {
+                            let _ = crate::storage::update_title(recording_id, title);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Clean up temporary rendered transcript file
     let rendered_path = get_data_dir().join(recording_id).join("transcript_rendered.txt");

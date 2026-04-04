@@ -1580,6 +1580,8 @@ if (window.__TAURI__) {
 
       if (stage === 'Done') {
         clearTranscriptionTimer();
+        btn.disabled = false;
+        btn.innerHTML = '<span style="font-weight: 600; font-size: 12px;">Transcribe</span>';
         return;
       }
 

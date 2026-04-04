@@ -146,8 +146,20 @@ pub async fn download_llm_model(
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Check for partial download to resume
+    let existing_len = if file_path.exists() {
+        std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut request = client.get(model_def.url);
+    if existing_len > 0 {
+        request = request.header("Range", format!("bytes={}-", existing_len));
+    }
+
     let res = tokio::select! {
-        res = client.get(model_def.url).send() => res.map_err(|e| e.to_string())?,
+        res = request.send() => res.map_err(|e| e.to_string())?,
         Ok(msg) = cancel_rx.recv() => {
             if msg == model_id {
                 return Err("cancelled".to_string());
@@ -156,16 +168,32 @@ pub async fn download_llm_model(
         }
     };
 
-    if !res.status().is_success() {
-        return Err(format!("Download failed: HTTP {}", res.status()));
+    let status = res.status();
+    if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(format!("Download failed: HTTP {}", status));
     }
 
-    let total_size = res.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&file_path)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (total_size, mut downloaded, resume) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        let content_len = res.content_length().unwrap_or(0);
+        (existing_len + content_len, existing_len, true)
+    } else {
+        let content_len = res.content_length().unwrap_or(0);
+        (content_len, 0u64, false)
+    };
+
+    let mut file = if resume {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&file_path)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        tokio::fs::File::create(&file_path)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+
     let mut stream = res.bytes_stream();
-    let mut downloaded: u64 = 0;
     let mut last_emit = Instant::now();
 
     loop {
