@@ -188,9 +188,7 @@ function wireProviderSaveBtns(el) {
       btn.textContent = '...';
       try {
         await invoke('save_settings', { settings: appSettings });
-        if (typeof window.updateTranscriptionKeyStatusDot === 'function') {
-          window.updateTranscriptionKeyStatusDot();
-        }
+        // Transcription key status is updated via settings change event
 
         if (value) {
           btn.textContent = 'Checking...';

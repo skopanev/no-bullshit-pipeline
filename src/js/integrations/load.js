@@ -41,9 +41,7 @@ async function loadLinearProfiles() {
 }
 
 async function loadSlackForIntegrations() {
-  if (typeof window.loadSlackIntegrations === 'function') {
-    await window.loadSlackIntegrations();
-  }
+  // slack is loaded via main.js init — no-op here to avoid circular deps
 }
 
 async function loadSavePathIntegrations() {

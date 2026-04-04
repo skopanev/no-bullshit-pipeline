@@ -170,7 +170,7 @@ async function runE2ETests() {
   // Test: Check main.js has all handlers
   await test('Frontend JS has all handlers', async () => {
     const { readFileSync } = await import('fs');
-    const mainJs = readFileSync(join(__dirname, 'src', 'main.js'), 'utf-8');
+    const mainJs = readFileSync(join(__dirname, 'src', 'dist', 'app.js'), 'utf-8');
 
     const requiredHandlers = [
       'summarize_recording',

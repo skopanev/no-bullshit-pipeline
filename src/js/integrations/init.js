@@ -13,9 +13,7 @@ export function initIntegrationsSettings() {
       loadAllIntegrations();
     }
     if (modelsTab && modelsTab.classList.contains('active')) {
-      if (typeof window.refreshAllProviderModels === 'function') {
-        window.refreshAllProviderModels();
-      }
+      loadAllIntegrations();
     }
   });
 

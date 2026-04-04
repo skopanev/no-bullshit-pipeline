@@ -7,6 +7,7 @@ import * as pipelineState from './state.js';
 import { renderPipelineFlowHTML } from './flow-renderer.js';
 import { loadCliAvailability } from './models.js';
 import { openPipelineEditor } from './editor.js';
+import { renderPipelineChips } from './chips.js';
 
 // DOM refs
 const pipelineDefsListEl = document.getElementById('pipeline-defs-list');
@@ -25,8 +26,7 @@ export async function loadPipelineDefs() {
     }
 
     renderPipelineDefsList();
-    if (typeof renderPipelineChips === 'function') renderPipelineChips();
-    if (typeof populateDefaultPipelineSelect === 'function') populateDefaultPipelineSelect();
+    renderPipelineChips();
     // Pre-load CLI availability in background
     loadCliAvailability();
   } catch (err) {

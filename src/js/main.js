@@ -10,15 +10,15 @@ import { showToast } from './ui/toast.js';
 import { ViewManager } from './ui/view-manager.js';
 
 // Settings
-import { loadSettings, saveSettings, switchSettingsTab, initSettingsListeners } from './settings/settings.js';
+import { loadSettings, switchSettingsTab, initSettingsListeners } from './settings/settings.js';
 import { initTranscriptionSettings } from './settings/transcription.js';
 import { updatePermissionStatus, initPermissions } from './settings/permissions.js';
 
 // Recording
-import { startTimer, stopTimer } from './recording/timer.js';
-import { startWaveformAnimation, stopWaveformAnimation } from './recording/waveform.js';
-import { startLiveTranscript, stopLiveTranscript } from './recording/live-transcript.js';
-import { toggleRecording, setRecordingUI, startRecording, stopRecording } from './recording/controls.js';
+import './recording/timer.js';
+import './recording/waveform.js';
+import './recording/live-transcript.js';
+import { toggleRecording } from './recording/controls.js';
 import { loadRecordings, renderRecordingsList } from './recording/list.js';
 import { showDetailView, hideDetailView } from './recording/detail.js';
 import { autoTranscribeAndExecute } from './recording/auto-execute.js';
@@ -26,6 +26,7 @@ import { autoTranscribeAndExecute } from './recording/auto-execute.js';
 // Pipeline
 import { loadPipelineDefs } from './pipeline/defs-list.js';
 import { renderPipelineFlowHTML } from './pipeline/flow-renderer.js';
+import { renderPipelineChips } from './pipeline/chips.js';
 
 // Prompts
 import { loadPromptTemplates, initPromptTemplates } from './prompts/templates.js';
@@ -57,6 +58,9 @@ on('tab:pipelines', () => loadPipelineDefs());
 on('tab:prompts', () => loadPromptTemplates());
 on('recording:showDetail', (id) => showDetailView(id));
 on('recording:hideDetail', () => hideDetailView());
+on('recordings:reload', async () => { await loadRecordings(); renderRecordingsList(); });
+on('integrations:changed', () => loadAllIntegrations());
+on('pipelines:renderChips', () => renderPipelineChips());
 
 // Load templates for detail view
 async function loadTemplates() {

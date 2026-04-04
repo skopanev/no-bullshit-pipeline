@@ -455,6 +455,3 @@ listen('transcription_progress', (event) => {
     }
   }
 });
-
-// Make showDetailView available globally for onclick handlers in HTML
-window.showDetailView = showDetailView;
