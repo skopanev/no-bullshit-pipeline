@@ -16,6 +16,7 @@
     "build": "bun run build:js && tauri build",
     "tauri": "tauri",
     "build:release": "./build.sh",
+    "clean": "rm -rf src-tauri/target src/dist",
     "update-packages": "rustup update && cargo update && bun update",
     "upgrade-packages": "cd src-tauri && cargo upgrade && cd .. && bun update"
   },

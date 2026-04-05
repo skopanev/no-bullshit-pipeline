@@ -7,6 +7,8 @@ import { ViewManager } from '../ui/view-manager.js';
 import { startTimer, stopTimer } from './timer.js';
 import { startWaveformAnimation, stopWaveformAnimation } from './waveform.js';
 import { startLiveTranscript, stopLiveTranscript } from './live-transcript.js';
+import { loadRecordings } from './list.js';
+import { showDetailView } from './detail.js';
 
 export async function toggleRecording() {
   if (state.isRecordingBusy) return;
@@ -52,6 +54,10 @@ export function setRecordingUI(recording) {
 export function updateMainButton() {
   const recordToggleBtn = document.getElementById('record-toggle-btn');
   if (!recordToggleBtn) return;
+
+  // While recording, setRecordingUI owns the button state (red stop square)
+  if (state.isRecording) return;
+
   recordToggleBtn.classList.remove('is-active');
 
   if (state.selectedRecordingId && !state.isRecording) {
@@ -75,10 +81,10 @@ export async function startRecording() {
     setIsRecording(true);
     setRecordingUI(true);
 
-    emit('recordings:reload');
+    await loadRecordings();
     startTimer();
     startWaveformAnimation();
-    emit('recording:showDetail', metadata.id);
+    await showDetailView(metadata.id);
     startLiveTranscript(metadata.id);
 
     showToast('Recording started', 'info');
@@ -123,10 +129,10 @@ export async function stopRecording() {
     setRecordingUI(false);
     emit('pipelines:renderChips');
 
-    emit('recordings:reload');
+    await loadRecordings();
 
     if (state.selectedRecordingId === currentId) {
-      emit('recording:showDetail', currentId);
+      await showDetailView(currentId);
       emit('pipelines:renderChips');
     }
   } catch (error) {

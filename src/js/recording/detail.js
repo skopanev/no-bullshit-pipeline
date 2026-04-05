@@ -4,6 +4,7 @@ import { setSelectedRecordingId } from '../core/state.js';
 import { formatDuration, getDuration, escapeHtml } from '../core/utils.js';
 import { looksLikeMarkdown, applyMarkdownRendering } from '../ui/markdown.js';
 import { showToast } from '../ui/toast.js';
+import { showConfirm } from '../ui/confirm-modal.js';
 import { ViewManager } from '../ui/view-manager.js';
 import { updateMainButton } from './controls.js';
 import { loadRecordings } from './list.js';
@@ -331,6 +332,42 @@ async function renderPipelineCards(id, isProcessing) {
 // Wire back button
 const backBtn = document.getElementById('back-btn');
 if (backBtn) backBtn.addEventListener('click', hideDetailView);
+
+// Wire delete button in detail header
+const deleteBtnHeader = document.getElementById('delete-btn-header');
+if (deleteBtnHeader) {
+  deleteBtnHeader.addEventListener('click', async () => {
+    if (!state.selectedRecordingId) return;
+    const ok = await showConfirm('Delete Recording?', 'This action cannot be undone.');
+    if (!ok) return;
+    try {
+      await invoke('delete_recording', { recordingId: state.selectedRecordingId });
+      hideDetailView();
+      await loadRecordings();
+    } catch (e) {
+      console.error('Delete failed:', e);
+      if (e && typeof e === 'string' && e.includes('finalized')) {
+        showToast('Recording is still being finalized. Please wait a moment and try again.', 'info');
+      } else {
+        showToast('Delete failed: ' + e, 'error');
+      }
+    }
+  });
+}
+
+// Wire open-folder button in detail header
+const openFolderBtnHeader = document.getElementById('open-folder-btn-header');
+if (openFolderBtnHeader) {
+  openFolderBtnHeader.addEventListener('click', async () => {
+    if (!state.selectedRecordingId || !state.appSettings?.storage_path) return;
+    const folderPath = `${state.appSettings.storage_path}/${state.selectedRecordingId}`;
+    try {
+      await window.__TAURI_PLUGIN_OPENER__.openPath(folderPath);
+    } catch (e) {
+      console.error('Failed to open folder:', e);
+    }
+  });
+}
 
 // Wire Transcribe button
 const processBtn = document.getElementById('process-btn');
