@@ -37,15 +37,20 @@ codesign -dvvv "$APP_PATH" 2>&1 | grep -E "(Authority|Identifier|TeamIdentifier)
 echo "==> Creating DMG..."
 mkdir -p builds
 DMG_PATH="builds/${NAME}_v${VERSION}.dmg"
+
+# Detach any mounted DMG for this volume and remove old file
+hdiutil detach "/Volumes/$NAME" >/dev/null 2>&1 || true
 rm -f "$DMG_PATH"
 
 create-dmg \
   --volname "$NAME" \
+  --background "src-tauri/dmg-assets/background.png" \
   --window-pos 200 120 \
-  --window-size 660 400 \
-  --icon-size 80 \
-  --icon "$NAME.app" 180 170 \
-  --app-drop-link 480 170 \
+  --window-size 820 520 \
+  --icon-size 160 \
+  --text-size 14 \
+  --icon "$NAME.app" 220 230 \
+  --app-drop-link 600 230 \
   --hide-extension "$NAME.app" \
   --no-internet-enable \
   "$DMG_PATH" \
