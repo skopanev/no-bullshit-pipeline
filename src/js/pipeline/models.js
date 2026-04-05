@@ -3,6 +3,7 @@
 import { invoke } from '../core/tauri.js';
 import { escapeHtml } from '../core/utils.js';
 import { appSettings } from '../core/state.js';
+import { llmModelsData } from '../integrations/state.js';
 import { FALLBACK_CLI_INFO } from './constants.js';
 
 export let cliAvailabilityCache = null;
@@ -16,11 +17,6 @@ export async function loadCliAvailability() {
     cliAvailabilityCache = FALLBACK_CLI_INFO;
   }
   return cliAvailabilityCache;
-}
-
-export async function refreshCliAvailability() {
-  cliAvailabilityCache = null;
-  return loadCliAvailability();
 }
 
 export function isChatCapableModel(modelId) {
@@ -56,7 +52,7 @@ export function buildModelOptions(providerId, currentModel, expanded = false) {
   }
 
   if (providerId === 'local') {
-    const models = (typeof llmModelsData !== 'undefined') ? llmModelsData.filter(m => m.downloaded) : [];
+    const models = (llmModelsData || []).filter(m => m.downloaded);
     if (models.length === 0) return { html: '<option value="" disabled>No local models downloaded</option>', hasMore: false, total: 0 };
     let displayModels = expanded ? models : models.slice(0, LOCAL_MAX_DEFAULT);
     if (currentModel && !displayModels.some(m => m.id === currentModel)) {

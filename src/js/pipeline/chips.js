@@ -122,7 +122,7 @@ async function handleChipClick(pipelineName) {
   }
 }
 
-async function startRecordingWithPipeline(pipelineName) {
+export async function startRecordingWithPipeline(pipelineName) {
   state.setIsRecordingBusy(true);
   ViewManager.showRecordings();
 

@@ -18,7 +18,7 @@ import { updatePermissionStatus, initPermissions } from './settings/permissions.
 import './recording/timer.js';
 import './recording/waveform.js';
 import './recording/live-transcript.js';
-import { toggleRecording } from './recording/controls.js';
+import { toggleRecording, startRecording } from './recording/controls.js';
 import { loadRecordings, renderRecordingsList } from './recording/list.js';
 import { showDetailView, hideDetailView } from './recording/detail.js';
 import { autoTranscribeAndExecute } from './recording/auto-execute.js';
@@ -26,7 +26,7 @@ import { autoTranscribeAndExecute } from './recording/auto-execute.js';
 // Pipeline
 import { loadPipelineDefs } from './pipeline/defs-list.js';
 import { renderPipelineFlowHTML } from './pipeline/flow-renderer.js';
-import { renderPipelineChips } from './pipeline/chips.js';
+import { renderPipelineChips, startRecordingWithPipeline } from './pipeline/chips.js';
 
 // Prompts
 import { loadPromptTemplates, initPromptTemplates } from './prompts/templates.js';
@@ -91,6 +91,27 @@ async function init() {
   } catch (err) { console.error('Failed to fetch version:', err); }
 
   await updatePermissionStatus();
+
+  // System audio warnings
+  listen('recording_warning', (event) => {
+    console.warn('Recording warning:', event.payload);
+    showToast(event.payload, 'warning');
+  });
+
+  // Tray menu: start recording with preselected pipeline
+  listen('tray-start-pipeline', async (event) => {
+    const pipelineName = event.payload;
+    if (!state.isRecording && !state.isRecordingBusy) {
+      await startRecordingWithPipeline(pipelineName);
+    }
+  });
+
+  // Auto-start recording when a call is detected
+  listen('call-detected', async () => {
+    if (!state.isRecording && !state.isRecordingBusy) {
+      await startRecording();
+    }
+  });
 
   // Auto-transcribe + auto-execute on recording completion
   listen('recording_complete', async (event) => {

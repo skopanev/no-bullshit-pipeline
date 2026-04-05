@@ -13,11 +13,6 @@ export const CLOUD_PROVIDERS = [
   { id: 'anthropic', name: 'Anthropic', desc: 'Claude structured extraction',             placeholder: 'sk-ant-...', icon: 'assets/anthropic.svg' },
 ];
 
-export const LOCAL_PROVIDERS = [
-  { id: 'local',  name: 'Local LLM', desc: 'GGUF models stored on device', icon: 'assets/local-llm.svg' },
-  { id: 'ollama', name: 'Ollama',    desc: 'Local inference via Ollama',    icon: 'assets/ollama.svg'    },
-];
-
 const CAP_BADGE_COLORS = {
   'Transcription': 'rgba(16,185,129,0.18)',
   'Processing':    'rgba(59,130,246,0.18)',
@@ -132,9 +127,6 @@ export function renderModelsProviders() {
   wireFreshnessBtn(el);
   renderLocalLlmModelsInner();
 }
-
-// Backward-compat alias
-export function renderProcessingProviders() { renderModelsProviders(); }
 
 function wireOllamaHostBtn(el) {
   const saveOllamaHostBtn = el.querySelector('.save-ollama-host-btn');
@@ -262,7 +254,7 @@ function wireFreshnessBtn(el) {
 // Module-level freshness check state
 let freshnessCheckRunning = false;
 
-export function cancelFreshnessCheck() {
+export async function cancelFreshnessCheck() {
   if (!freshnessCheckRunning) return;
-  invoke('cancel_llm_freshness');
+  await invoke('cancel_llm_freshness');
 }

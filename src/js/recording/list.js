@@ -5,6 +5,8 @@ import { escapeHtml, formatDuration, getDuration } from '../core/utils.js';
 import { emit } from '../core/events.js';
 import { showConfirm } from '../ui/confirm-modal.js';
 import { showToast } from '../ui/toast.js';
+import { allPipelineDefs } from '../pipeline/state.js';
+import { renderPipelineFlowHTML } from '../pipeline/flow-renderer.js';
 
 const dateOptions = {
   month: 'short',
@@ -54,8 +56,8 @@ export function renderRecordingsList() {
     // Pipeline tags with step chips
     const pipelineTags = (rec.pipelines || []).map(p => {
       const statusClass = p.status === 'Done' ? 'tag-done' : p.status === 'Partial' ? 'tag-partial' : p.status === 'Running' ? 'tag-running' : 'tag-waiting';
-      const def = typeof allPipelineDefs !== 'undefined' ? allPipelineDefs.find(d => d.name === p.name) : null;
-      const flowHtml = def && def.steps && def.steps.length > 0 && typeof renderPipelineFlowHTML !== 'undefined'
+      const def = allPipelineDefs ? allPipelineDefs.find(d => d.name === p.name) : null;
+      const flowHtml = def && def.steps && def.steps.length > 0
         ? renderPipelineFlowHTML(def.steps, { compact: true })
         : '';
       return `<div class="recording-pipeline-entry ${statusClass}"><span class="recording-pipeline-name">${escapeHtml(p.name)}</span>${flowHtml}</div>`;

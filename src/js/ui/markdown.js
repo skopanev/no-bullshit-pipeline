@@ -18,18 +18,3 @@ export function applyMarkdownRendering(el, rawText) {
     el.classList.add('md-raw');
   }
 }
-
-export function toggleMarkdownRaw(el) {
-  if (!el || !el.dataset.rawText) return;
-  if (el.classList.contains('md-rendered')) {
-    el.textContent = el.dataset.rawText;
-    el.classList.remove('md-rendered');
-    el.classList.add('md-raw');
-    return true;
-  } else {
-    el.innerHTML = window.marked.parse(el.dataset.rawText);
-    el.classList.add('md-rendered');
-    el.classList.remove('md-raw');
-    return false;
-  }
-}

@@ -7,6 +7,7 @@ import { showConfirm } from '../ui/confirm-modal.js';
 import { CONNECTOR_META, PROVIDER_META } from './constants.js';
 import * as pipelineState from './state.js';
 import { trimModelName } from './models.js';
+import { llmModelsData } from '../integrations/state.js';
 import { maybeAutoName } from './delivery-options.js';
 import { showStepEditor, addNewStep } from './step-editor.js';
 import { loadPipelineDefs } from './defs-list.js';
@@ -109,7 +110,7 @@ export function renderPipelineSteps() {
       if (model) {
         let short;
         if (provider === 'local') {
-          const localModel = (typeof llmModelsData !== 'undefined') ? llmModelsData.find(m => m.id === model) : null;
+          const localModel = (llmModelsData || []).find(m => m.id === model);
           short = localModel ? localModel.name : model;
         } else {
           short = trimModelName(model, provider);

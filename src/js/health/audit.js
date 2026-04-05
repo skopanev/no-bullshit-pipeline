@@ -46,9 +46,7 @@ export function runHealthAudit() {
       });
     }
   }
-  const result = { passed: AUDIT_ELEMENTS.length - issues.length, failed: issues.length, issues };
-  window._lastHealthResult = result;
-  return result;
+  return { passed: AUDIT_ELEMENTS.length - issues.length, failed: issues.length, issues };
 }
 
 export function renderHealthBadge(result) {

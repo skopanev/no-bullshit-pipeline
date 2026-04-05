@@ -6,6 +6,8 @@ import { showConfirm } from '../ui/confirm-modal.js';
 import { showToast } from '../ui/toast.js';
 import { looksLikeMarkdown } from '../ui/markdown.js';
 import { loadRecordings } from './list.js';
+import { allPipelineDefs } from '../pipeline/state.js';
+import { renderPipelineFlowHTML } from '../pipeline/flow-renderer.js';
 
 let pipelineProgressUnlisten = null;
 let pipelineRunningSteps = {};
@@ -77,8 +79,8 @@ export async function renderPipelineStatus(recordingId) {
   ${runBtn}${deleteBtn}
 </div>${pipelineErrorHtml}`;
 
-      const pipelineDef = typeof allPipelineDefs !== 'undefined' && allPipelineDefs.find(d => d.name === st.name);
-      const canRenderFlow = pipelineDef && typeof renderPipelineFlowHTML !== 'undefined';
+      const pipelineDef = allPipelineDefs && allPipelineDefs.find(d => d.name === st.name);
+      const canRenderFlow = !!pipelineDef;
       const runningKey = `${recordingId}:${st.name}`;
       const runningInfo = (st.status === 'running') ? pipelineRunningSteps[runningKey] : null;
 

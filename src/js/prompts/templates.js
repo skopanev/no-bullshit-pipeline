@@ -3,42 +3,19 @@ import { escapeHtml } from '../core/utils.js';
 import * as state from '../core/state.js';
 import { showToast } from '../ui/toast.js';
 import { showConfirm } from '../ui/confirm-modal.js';
+import { allPipelineDefs } from '../pipeline/state.js';
 
 let editingPromptTemplate = null;
 
 const promptTemplatesListEl = document.getElementById('prompt-templates-list');
-const promptsListEl = document.getElementById('prompts-list');
 const addPromptTemplateBtn = document.getElementById('add-prompt-template-btn');
-const addPromptViewBtn = document.getElementById('add-prompt-view-btn');
 const promptTemplateEditor = document.getElementById('prompt-template-editor');
-const promptViewEditor = document.getElementById('prompt-view-editor');
 const promptEditorTitle = document.getElementById('prompt-editor-title');
-const promptViewEditorTitle = document.getElementById('prompt-view-editor-title');
 const promptEditorName = document.getElementById('prompt-editor-name');
-const promptViewName = document.getElementById('prompt-view-name');
 const promptEditorText = document.getElementById('prompt-editor-text');
-const promptViewText = document.getElementById('prompt-view-text');
 const savePromptTemplateBtn = document.getElementById('save-prompt-template-btn');
-const savePromptViewBtn = document.getElementById('save-prompt-view-btn');
 const deletePromptTemplateBtn = document.getElementById('delete-prompt-template-btn');
-const deletePromptViewBtn = document.getElementById('delete-prompt-view-btn');
 const closePromptEditorBtn = document.getElementById('close-prompt-editor');
-const closePromptViewBtn = document.getElementById('close-prompt-view-btn');
-
-function pickVisible(primaryEl, secondaryEl) {
-  if (primaryEl && primaryEl.offsetParent !== null) return primaryEl;
-  if (secondaryEl && secondaryEl.offsetParent !== null) return secondaryEl;
-  return primaryEl || secondaryEl;
-}
-
-function getActivePromptList() { return pickVisible(promptTemplatesListEl, promptsListEl); }
-function getActivePromptEditor() { return pickVisible(promptTemplateEditor, promptViewEditor); }
-function getActivePromptTitle() { return pickVisible(promptEditorTitle, promptViewEditorTitle); }
-function getActivePromptName() { return pickVisible(promptEditorName, promptViewName); }
-function getActivePromptText() { return pickVisible(promptEditorText, promptViewText); }
-function getActiveSaveBtn() { return pickVisible(savePromptTemplateBtn, savePromptViewBtn); }
-function getActiveDeleteBtn() { return pickVisible(deletePromptTemplateBtn, deletePromptViewBtn); }
-function getActiveCloseBtn() { return pickVisible(closePromptEditorBtn, closePromptViewBtn); }
 
 export async function loadPromptTemplates() {
   try {
@@ -46,21 +23,19 @@ export async function loadPromptTemplates() {
     renderPromptTemplatesList();
   } catch (err) {
     console.error('Failed to load prompt templates:', err);
-    const listEl = getActivePromptList();
-    if (listEl) {
-      listEl.innerHTML = `<div style="color: var(--danger); opacity: 0.9; font-size: 0.85rem; text-align: center; padding: 1rem;">Failed to load templates: ${escapeHtml(String(err))}</div>`;
+    if (promptTemplatesListEl) {
+      promptTemplatesListEl.innerHTML = `<div style="color: var(--danger); opacity: 0.9; font-size: 0.85rem; text-align: center; padding: 1rem;">Failed to load templates: ${escapeHtml(String(err))}</div>`;
     }
   }
 }
 
 function renderPromptTemplatesList() {
-  const listEl = getActivePromptList();
-  if (!listEl) return;
+  if (!promptTemplatesListEl) return;
   if (state.allPromptTemplates.length === 0) {
-    listEl.innerHTML = '<div style="color: var(--text-secondary); opacity: 0.6; font-size: 0.85rem; text-align: center; padding: 2rem;">No prompt templates yet.\n\nClick "+ New Prompt" to create one.</div>';
+    promptTemplatesListEl.innerHTML = '<div style="color: var(--text-secondary); opacity: 0.6; font-size: 0.85rem; text-align: center; padding: 2rem;">No prompt templates yet.\n\nClick "+ New Prompt" to create one.</div>';
     return;
   }
-  listEl.innerHTML = state.allPromptTemplates.map(t => {
+  promptTemplatesListEl.innerHTML = state.allPromptTemplates.map(t => {
     const safeName = escapeHtml(t.name);
     const safePreview = escapeHtml((t.prompt || '').substring(0, 100)) + (t.prompt && t.prompt.length > 100 ? '...' : '');
     const updated = t.updated_at ? new Date(t.updated_at).toLocaleDateString() : '';
@@ -76,14 +51,14 @@ function renderPromptTemplatesList() {
   `;
   }).join('');
 
-  listEl.querySelectorAll('.template-item').forEach(el => {
+  promptTemplatesListEl.querySelectorAll('.template-item').forEach(el => {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.template-item-delete')) return;
       openPromptEditor(el.dataset.name);
     });
   });
 
-  listEl.querySelectorAll('.template-item-delete').forEach(btn => {
+  promptTemplatesListEl.querySelectorAll('.template-item-delete').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       deletePromptTemplateWithConfirm(btn.dataset.name);
@@ -92,7 +67,7 @@ function renderPromptTemplatesList() {
 }
 
 function findPipelinesReferencingPrompt(promptName) {
-  const pipelines = window.__nbpAllPipelineDefs || [];
+  const pipelines = allPipelineDefs || [];
   const referencing = [];
   for (const p of pipelines) {
     for (const step of (p.steps || [])) {
@@ -106,20 +81,15 @@ function findPipelinesReferencingPrompt(promptName) {
 }
 
 export async function openPromptEditor(name) {
-  const editorEl = getActivePromptEditor();
-  if (!editorEl) return;
+  if (!promptTemplateEditor) return;
   if (name) {
     const t = state.allPromptTemplates.find(t => t.name === name);
     if (!t) return;
     editingPromptTemplate = name;
-    const titleEl = getActivePromptTitle();
-    const nameEl = getActivePromptName();
-    const textEl = getActivePromptText();
-    const deleteBtn = getActiveDeleteBtn();
-    if (titleEl) titleEl.textContent = 'Edit Prompt';
-    if (nameEl) nameEl.value = t.name;
-    if (textEl) textEl.value = t.prompt || '';
-    if (deleteBtn) deleteBtn.style.display = 'inline-block';
+    if (promptEditorTitle) promptEditorTitle.textContent = 'Edit Prompt';
+    if (promptEditorName) promptEditorName.value = t.name;
+    if (promptEditorText) promptEditorText.value = t.prompt || '';
+    if (deletePromptTemplateBtn) deletePromptTemplateBtn.style.display = 'inline-block';
 
     const usageSection = document.getElementById('prompt-usage-section');
     const usageList = document.getElementById('prompt-usage-list');
@@ -141,33 +111,25 @@ export async function openPromptEditor(name) {
     }
   } else {
     editingPromptTemplate = null;
-    const titleEl = getActivePromptTitle();
-    const nameEl = getActivePromptName();
-    const textEl = getActivePromptText();
-    const deleteBtn = getActiveDeleteBtn();
-    if (titleEl) titleEl.textContent = 'New Prompt';
-    if (nameEl) nameEl.value = '';
-    if (textEl) textEl.value = '';
-    if (deleteBtn) deleteBtn.style.display = 'none';
+    if (promptEditorTitle) promptEditorTitle.textContent = 'New Prompt';
+    if (promptEditorName) promptEditorName.value = '';
+    if (promptEditorText) promptEditorText.value = '';
+    if (deletePromptTemplateBtn) deletePromptTemplateBtn.style.display = 'none';
     const usageSection = document.getElementById('prompt-usage-section');
     if (usageSection) usageSection.style.display = 'none';
   }
-  editorEl.style.display = 'block';
-  const nameEl = getActivePromptName();
-  if (nameEl) nameEl.focus();
+  promptTemplateEditor.style.display = 'block';
+  if (promptEditorName) promptEditorName.focus();
 }
 
 function closePromptEditor() {
-  const editorEl = getActivePromptEditor();
-  if (editorEl) editorEl.style.display = 'none';
+  if (promptTemplateEditor) promptTemplateEditor.style.display = 'none';
   editingPromptTemplate = null;
 }
 
 async function savePromptTemplate() {
-  const nameEl = getActivePromptName();
-  const textEl = getActivePromptText();
-  const name = nameEl?.value.trim() || '';
-  const prompt = textEl?.value.trim() || '';
+  const name = promptEditorName?.value.trim() || '';
+  const prompt = promptEditorText?.value.trim() || '';
   if (!name) { showToast('Name is required', 'error'); return; }
   if (!prompt) { showToast('Prompt text is required', 'error'); return; }
 
@@ -248,11 +210,7 @@ async function deletePromptTemplateWithConfirm(name) {
 
 export function initPromptTemplates() {
   if (addPromptTemplateBtn) addPromptTemplateBtn.addEventListener('click', () => openPromptEditor(null));
-  if (addPromptViewBtn) addPromptViewBtn.addEventListener('click', () => openPromptEditor(null));
   if (closePromptEditorBtn) closePromptEditorBtn.addEventListener('click', closePromptEditor);
-  if (closePromptViewBtn) closePromptViewBtn.addEventListener('click', closePromptEditor);
   if (savePromptTemplateBtn) savePromptTemplateBtn.addEventListener('click', savePromptTemplate);
-  if (savePromptViewBtn) savePromptViewBtn.addEventListener('click', savePromptTemplate);
   if (deletePromptTemplateBtn) deletePromptTemplateBtn.addEventListener('click', deletePromptTemplate);
-  if (deletePromptViewBtn) deletePromptViewBtn.addEventListener('click', deletePromptTemplate);
 }

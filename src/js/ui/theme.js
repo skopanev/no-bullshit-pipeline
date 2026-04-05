@@ -5,14 +5,3 @@ export function applyTheme(theme) {
   if (theme !== 'neon-purple') document.body.classList.add(theme);
   document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b.dataset.theme === theme));
 }
-
-export function initThemeButtons() {
-  document.querySelectorAll('.theme-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const theme = btn.dataset.theme;
-      if (!theme) return;
-      applyTheme(theme);
-      document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b === btn));
-    });
-  });
-}
