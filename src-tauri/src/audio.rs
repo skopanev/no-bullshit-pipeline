@@ -1,4 +1,6 @@
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::thread::JoinHandle;
 use tauri::{Emitter, State};
@@ -14,6 +16,7 @@ pub struct AudioState {
     pub save_mix_only: Mutex<bool>,
     pub finalization_handle: Mutex<Option<JoinHandle<()>>>,
     pub realtime_transcriber: Mutex<Option<crate::realtime_transcription::LocalTranscriber>>,
+    pub silence_monitor_stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl AudioState {
@@ -28,6 +31,7 @@ impl AudioState {
             save_mix_only: Mutex::new(true),
             finalization_handle: Mutex::new(None),
             realtime_transcriber: Mutex::new(None),
+            silence_monitor_stop: Mutex::new(None),
         }
     }
 
@@ -98,7 +102,72 @@ pub fn start_recording(app_handle: tauri::AppHandle, state: State<'_, AudioState
     *state.current_session.lock().map_err(|e| e.to_string())? = Some(metadata);
     *is_recording = true;
 
+    // Start silence monitor if configured
+    let settings = crate::config::load_settings();
+    let silence_secs = settings.auto_stop_silence_seconds;
+    if silence_secs > 0 {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = stop_flag.clone();
+        let app_clone = app_handle.clone();
+        std::thread::spawn(move || {
+            run_silence_monitor(flag_clone, app_clone, silence_secs);
+        });
+        *state.silence_monitor_stop.lock().map_err(|e| e.to_string())? = Some(stop_flag);
+    }
+
     Ok(metadata_clone)
+}
+
+/// System audio silence threshold (only remote participants' audio matters)
+const SILENCE_THRESHOLD: f32 = 0.005;
+/// Minimum recording duration before auto-stop kicks in (seconds)
+const MIN_DURATION_BEFORE_AUTO_STOP: u64 = 30;
+
+fn run_silence_monitor(should_stop: Arc<AtomicBool>, app_handle: tauri::AppHandle, silence_secs: u32) {
+    use std::time::{Duration, Instant};
+
+    let mut silence_start: Option<Instant> = None;
+    let silence_threshold_duration = Duration::from_secs(silence_secs as u64);
+    let start_time = Instant::now();
+    // Track whether we ever saw system audio (confirms this is a call, not solo recording)
+    let mut ever_had_system_audio = false;
+
+    while !should_stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Don't auto-stop too early
+        if start_time.elapsed().as_secs() < MIN_DURATION_BEFORE_AUTO_STOP {
+            let sys_level = crate::system_audio::get_system_audio_level();
+            if sys_level > SILENCE_THRESHOLD {
+                ever_had_system_audio = true;
+            }
+            continue;
+        }
+
+        let sys_level = crate::system_audio::get_system_audio_level();
+        if sys_level > SILENCE_THRESHOLD {
+            ever_had_system_audio = true;
+            silence_start = None;
+            continue;
+        }
+
+        // Only auto-stop if we confirmed this was a call (had system audio at some point)
+        if !ever_had_system_audio {
+            continue;
+        }
+
+        if silence_start.is_none() {
+            silence_start = Some(Instant::now());
+            log::info!("silence_monitor: system audio went silent, waiting {}s", silence_secs);
+        }
+        if let Some(start) = silence_start {
+            if start.elapsed() >= silence_threshold_duration {
+                log::info!("silence_monitor: {}s system audio silence — auto-stopping", silence_secs);
+                let _ = app_handle.emit("auto-stop-recording", ());
+                return;
+            }
+        }
+    }
 }
 
 /// Check that at least 100MB of disk space is available
@@ -136,6 +205,13 @@ pub fn resume_recording(_state: State<'_, AudioState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn stop_recording(app_handle: tauri::AppHandle, state: State<'_, AudioState>) -> Result<(), String> {
+    // Stop silence monitor
+    if let Ok(mut guard) = state.silence_monitor_stop.lock() {
+        if let Some(flag) = guard.take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
     let mut is_recording = state.is_recording.lock().map_err(|e| e.to_string())?;
     if !*is_recording {
         return Ok(());

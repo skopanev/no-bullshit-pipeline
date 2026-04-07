@@ -39,22 +39,29 @@ pub fn init_notification_delegate(app_handle: &tauri::AppHandle) {
 }
 
 /// Send a notification via UNUserNotificationCenter (modern macOS API)
+/// Falls back to osascript in debug builds without an app bundle.
 fn send_un_notification(title: &str, body: &str) {
-    use objc2_foundation::NSString;
-    use objc2_user_notifications::{UNNotificationRequest, UNUserNotificationCenter};
-
-    // Guard against missing app bundle (debug binary)
     let has_bundle: bool = {
         let bundle = objc2_foundation::NSBundle::mainBundle();
         bundle.bundleIdentifier().is_some()
     };
+
     if !has_bundle {
-        log::warn!("Cannot send UNNotification — no app bundle");
+        // Debug fallback: use osascript for notifications
+        log::info!("send_un_notification: no app bundle, using osascript fallback");
+        let script = format!(
+            r#"display notification "{}" with title "{}""#,
+            body.replace('"', "\\\""),
+            title.replace('"', "\\\""),
+        );
+        let _ = Command::new("osascript").args(["-e", &script]).spawn();
         return;
     }
 
+    use objc2_foundation::NSString;
+    use objc2_user_notifications::{UNNotificationRequest, UNUserNotificationCenter};
+
     unsafe {
-        // UNMutableNotificationContent is part of UNNotificationContent
         let content: objc2::rc::Retained<objc2::runtime::NSObject> =
             objc2::msg_send![objc2::class!(UNMutableNotificationContent), new];
         let _: () = objc2::msg_send![&content, setTitle: &*NSString::from_str(title)];
@@ -495,7 +502,7 @@ fn run_detector(should_stop: Arc<AtomicBool>, app_handle: tauri::AppHandle) {
 
         let is_running = input_devices.iter().any(|&id| device_is_running(id));
 
-        // Only notify on transition from not-running to running
+        // Transition: not-running → running (call started)
         if is_running && !was_running {
             let since_last = last_notification.elapsed();
             if since_last >= Duration::from_secs(DEBOUNCE_SECS) {

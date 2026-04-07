@@ -190,8 +190,12 @@ pub async fn execute(
         .map_err(|e| format!("Failed to read input file: {}", e))?;
     let content = super::strip_frontmatter(&raw_content);
 
-    // Build the full prompt: user prompt + input content
-    let full_prompt = format!("{}\n\n{}", prompt, content);
+    // Substitute {transcript} variable, or append content if no placeholder
+    let full_prompt = if prompt.contains("{transcript}") {
+        crate::prompt_templates::substitute_variables(&prompt, content)
+    } else {
+        format!("{}\n\n{}", prompt, content)
+    };
 
     let mut cmd = match cli {
         "claude" => {

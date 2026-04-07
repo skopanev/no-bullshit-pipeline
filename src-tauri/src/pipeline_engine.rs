@@ -16,8 +16,11 @@ lazy_static::lazy_static! {
         std::sync::Mutex::new(HashMap::new());
 }
 
+/// Known topic heading labels (case-insensitive match for Latin)
+const TOPIC_LABELS: &[&str] = &["topic", "тема", "tema"];
+
 /// Extract a short title from pipeline step output.
-/// Looks for "## Topic" section content, "**Topic**:" inline, or first meaningful heading.
+/// Looks for topic section heading, inline topic label, or first content heading.
 fn extract_title_from_output(content: &str) -> Option<String> {
     // Skip frontmatter
     let body = if content.starts_with("---") {
@@ -28,12 +31,28 @@ fn extract_title_from_output(content: &str) -> Option<String> {
 
     let lines: Vec<&str> = body.lines().collect();
 
-    // Pass 1: Look for "## Topic" section — take the next non-empty line as title
+    // Pass 1: Look for topic heading — take the next non-empty line as title
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
+
+        // Match: "## Topic", "**Topic**", "**Тема**", "# Topic", etc.
         let heading = trimmed.trim_start_matches('#').trim();
-        if heading.eq_ignore_ascii_case("topic") {
-            // Next non-empty, non-separator line is the title
+        // Also strip bold markers: **Topic** → Topic
+        let clean = heading.trim_matches('*').trim();
+        let clean_lower = clean.to_lowercase();
+
+        let is_topic_heading = TOPIC_LABELS.iter().any(|&label| clean_lower == label);
+
+        if is_topic_heading {
+            // Check for inline value: "**Topic**: value" or "**Topic:** value"
+            // Find if there's text after a colon on the same line
+            if let Some(colon_pos) = trimmed.find(':') {
+                let after_colon = trimmed[colon_pos + 1..].trim().trim_matches('*').trim();
+                if !after_colon.is_empty() {
+                    return Some(after_colon.chars().take(100).collect());
+                }
+            }
+            // Otherwise take the next non-empty line
             for next_line in lines.iter().skip(i + 1) {
                 let next = next_line.trim();
                 if next.is_empty() || next == "---" { continue; }
@@ -45,20 +64,34 @@ fn extract_title_from_output(content: &str) -> Option<String> {
                 }
             }
         }
+    }
 
-        // "**Topic**: ..." or "Topic: ..." inline
-        if let Some(rest) = trimmed.strip_prefix("**Topic**:")
-            .or_else(|| trimmed.strip_prefix("**Topic:**"))
-            .or_else(|| trimmed.strip_prefix("Topic:"))
-        {
-            let title = rest.trim().trim_matches(|c: char| c == '*').trim();
-            if !title.is_empty() {
-                return Some(title.chars().take(100).collect());
+    // Pass 2: First non-generic heading (skip things like "Summary", "Резюме", etc.)
+    const SKIP_HEADINGS: &[&str] = &[
+        "summary", "резюме", "краткое резюме", "краткое содержание",
+        "краткое саммари разговора", "краткое резюме разговора",
+        "краткое содержание разговора", "краткое содержание транскрипта",
+        "резюме созвона", "резюме разговора",
+    ];
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading = trimmed.trim_start_matches('#').trim();
+            if !heading.is_empty() && !SKIP_HEADINGS.iter().any(|&s| heading.to_lowercase() == s) {
+                return Some(heading.chars().take(100).collect());
             }
         }
     }
 
     None
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
 }
 
 /// Get the pipeline output directory for a recording

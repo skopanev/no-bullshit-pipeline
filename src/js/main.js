@@ -113,6 +113,16 @@ async function init() {
     }
   });
 
+  // Auto-stop recording on silence
+  listen('auto-stop-recording', async () => {
+    if (state.isRecording && !state.isRecordingBusy) {
+      showToast('Auto-stopped: silence detected', 'info');
+      const { stopRecording } = await import('./recording/controls.js');
+      await stopRecording();
+    }
+  });
+
+
   // Auto-transcribe + auto-execute on recording completion
   listen('recording_complete', async (event) => {
     const recordingId = event.payload;

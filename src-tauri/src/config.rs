@@ -196,6 +196,9 @@ pub struct AppSettings {
     /// Detect calls (mic activation) and send a macOS notification
     #[serde(default)]
     pub call_detection_enabled: bool,
+    /// Auto-stop recording after N seconds of silence (0 = disabled)
+    #[serde(default)]
+    pub auto_stop_silence_seconds: u32,
     /// Whether the user has completed the interactive UI walkthrough
     #[serde(default)]
     pub walkthrough_completed: bool,
@@ -268,6 +271,7 @@ impl Default for AppSettings {
             default_pipeline: None,
             last_used_pipeline: None,
             call_detection_enabled: false,
+            auto_stop_silence_seconds: 0,
             walkthrough_completed: false,
             local_llm: LocalLlmConfig::default(),
             cli_agent: CliAgentConfig::default(),

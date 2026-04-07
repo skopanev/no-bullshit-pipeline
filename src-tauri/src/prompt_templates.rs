@@ -38,20 +38,79 @@ fn get_builtin_templates() -> HashMap<String, PromptTemplate> {
         "summary".to_string(),
         PromptTemplate {
             name: "summary".to_string(),
-            prompt: r#"Create a concise summary of this transcript.
+            prompt: r#"Summarize this transcript. Respond in the same language as the transcript.
 
-Include:
-1. **Topic**: What the conversation is about
-2. **Key Points**: The most important information discussed (3-7 bullet points)
-3. **Decisions**: Any conclusions or agreements reached
-4. **Open Questions**: Unresolved items or topics needing follow-up
+Use EXACTLY this format (no top-level heading, start directly with ## Topic):
 
-Keep it brief and actionable. Format as clean Markdown.
+## Topic
+One sentence — what the conversation is about.
+
+## Key Points
+- 3-7 bullet points, most important information discussed
+
+## Decisions
+- Conclusions or agreements reached (skip section if none)
+
+## Action Items
+- Who does what, with deadlines if mentioned (skip section if none)
+
+## Open Questions
+- Unresolved items needing follow-up (skip section if none)
+
+Rules:
+- Be concise and actionable
+- No disclaimers about transcript quality
+- No preamble or commentary — output only the summary
 
 Transcript:
 {transcript}"#.to_string(),
             created_at: now.clone(),
-            updated_at: now,
+            updated_at: now.clone(),
+        },
+    );
+
+    templates.insert(
+        "action-plan".to_string(),
+        PromptTemplate {
+            name: "action-plan".to_string(),
+            prompt: r#"Extract a detailed action plan from this transcript. Respond in the same language as the transcript.
+
+For each task or discussion topic, capture the full context — not just the headline. Include technical details, constraints, dependencies, and reasoning that was discussed.
+
+Use EXACTLY this format:
+
+## Topic
+One sentence — what the conversation is about.
+
+## Tasks
+
+For each task use this format:
+
+### <task title>
+- **Owner**: who is responsible (name or role, if mentioned)
+- **Priority**: high / medium / low (infer from conversation urgency)
+- **Deadline**: if mentioned
+- **Context**: why this task exists, what problem it solves, relevant background discussed
+- **Details**: specific technical details, approaches discussed, constraints, edge cases mentioned
+- **Acceptance criteria**: what "done" looks like (infer from discussion if not explicit)
+- **Dependencies**: what needs to happen first or what this blocks
+- **Open questions**: unresolved aspects of this specific task
+
+Skip any field that has no information. Include ALL tasks — even small ones.
+
+## Parking Lot
+- Ideas, tangents, or future considerations that were mentioned but not assigned
+
+Rules:
+- Preserve technical details and specific numbers/names from the conversation
+- If people discussed HOW to do something, capture the approach
+- No disclaimers about transcript quality
+- No preamble — output only the plan
+
+Transcript:
+{transcript}"#.to_string(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
         },
     );
 
