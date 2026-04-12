@@ -100,11 +100,11 @@ async function runE2ETests() {
   });
 
   // Test: Check app version command works
-  await test('App version is 0.3.0', async () => {
+  await test('App version is 0.4.0', async () => {
     // The version is embedded in the app
     const pkgJson = await import(join(__dirname, 'src-tauri', 'tauri.conf.json'), { with: { type: 'json' } });
-    if (pkgJson.default.version !== '0.3.0') {
-      throw new Error(`Expected version 0.3.0, got ${pkgJson.default.version}`);
+    if (pkgJson.default.version !== '0.4.0') {
+      throw new Error(`Expected version 0.4.0, got ${pkgJson.default.version}`);
     }
   });
 
@@ -196,10 +196,10 @@ async function runE2ETests() {
       'src-tauri/src/cloud_ai/anthropic.rs'
     ];
 
-    for (const mod of modules) {
-      const path = join(__dirname, mod);
+    for (const m of modules) {
+      const path = join(__dirname, m);
       if (!existsSync(path)) {
-        throw new Error(`Missing module: ${mod}`);
+        throw new Error(`Missing module: ${m}`);
       }
     }
   });

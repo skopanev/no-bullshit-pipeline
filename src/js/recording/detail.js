@@ -205,7 +205,7 @@ async function renderPipelineCards(id, isProcessing) {
     try {
       const states = await invoke('get_all_pipeline_states', { recordingId: id });
       if (states) for (const s of states) alreadyUsed.add(s.name);
-    } catch (_) {}
+    } catch (_) { /* states may not exist yet */ }
     const availableDefs = pipelineState.allPipelineDefs.filter(p => !alreadyUsed.has(p.name));
 
     let cardsHtml = '';

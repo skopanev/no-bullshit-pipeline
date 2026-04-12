@@ -131,7 +131,7 @@ function wireCancelBtns(el) {
       const modelId = btn.dataset.llmId;
       btn.disabled = true;
       btn.textContent = 'Cancelling...';
-      try { await invoke('cancel_llm_download', { modelId }); } catch (_) {}
+      try { await invoke('cancel_llm_download', { modelId }); } catch (_) { /* cancel best-effort */ }
     });
   });
 }

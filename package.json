@@ -1,7 +1,7 @@
 {
   "name": "nbp",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "scripts": {
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
@@ -18,7 +18,10 @@
     "build:release": "./build.sh",
     "clean": "rm -rf src-tauri/target src/dist",
     "update-packages": "rustup update && cargo update && bun update",
-    "upgrade-packages": "cd src-tauri && cargo upgrade && cd .. && bun update"
+    "upgrade-packages": "cd src-tauri && cargo upgrade && cd .. && bun update",
+    "bump": "node scripts/bump.mjs",
+    "bump:minor": "node scripts/bump.mjs minor",
+    "bump:major": "node scripts/bump.mjs major"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -28,7 +31,6 @@
     "globals": "^17.4.0"
   },
   "dependencies": {
-    "marked": "^17.0.5",
     "ui-ux-pro-mcp": "^1.5.0"
   }
 }

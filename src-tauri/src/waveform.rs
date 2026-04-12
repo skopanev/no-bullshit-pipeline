@@ -7,11 +7,8 @@ const WAVEFORM_SAMPLES: usize = 1000;
 
 /// Audio file metadata from actual OGG file
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct OggFileInfo {
     pub duration_sec: f64,
-    pub sample_rate: u32,
-    pub channels: u16,
 }
 
 /// Get actual audio info from OGG file (duration calculated from sample count)
@@ -20,7 +17,6 @@ pub fn get_ogg_file_info(path: &Path) -> Result<OggFileInfo, String> {
     let mut ogg_reader = OggStreamReader::new(file).map_err(|e| format!("Failed to parse OGG: {}", e))?;
 
     let sample_rate = ogg_reader.ident_hdr.audio_sample_rate;
-    let channels = ogg_reader.ident_hdr.audio_channels;
 
     // Count total samples by decoding
     let mut total_frames: u64 = 0;
@@ -37,8 +33,6 @@ pub fn get_ogg_file_info(path: &Path) -> Result<OggFileInfo, String> {
 
     Ok(OggFileInfo {
         duration_sec,
-        sample_rate,
-        channels: channels as u16,
     })
 }
 

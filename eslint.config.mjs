@@ -3,7 +3,7 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["src/vendor/**", "src-tauri/**", "dist/**"],
+    ignores: ["src/vendor/**", "src/dist/**", "src-tauri/**", "dist/**"],
   },
   {
     files: ["src/**/*.js"],

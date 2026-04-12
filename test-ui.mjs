@@ -35,7 +35,7 @@ async function testUI() {
             };
           }
           if (cmd === 'list_recordings') return [];
-          if (cmd === 'get_app_version') return '0.3.0';
+          if (cmd === 'get_app_version') return '0.4.0';
           if (cmd === 'check_permissions') return { mic: true, system_audio: true };
           if (cmd === 'list_templates') return [
             { name: 'meeting-notes', description: 'Meeting Notes' },
