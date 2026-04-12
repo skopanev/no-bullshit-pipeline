@@ -1,9 +1,11 @@
 import { invoke, listen } from '../core/tauri.js';
 import * as state from '../core/state.js';
 import { applyMarkdownRendering } from '../ui/markdown.js';
+import { showToast } from '../ui/toast.js';
 
 let liveTranscriptGeneration = 0;
 let liveTranscriptUnlisten = null;
+let liveErrorUnlisten = null;
 
 function renderLiveTranscript(text) {
   const content = document.getElementById('live-transcript-content');
@@ -25,10 +27,9 @@ export async function startLiveTranscript(recordingId) {
   if (panel) panel.style.display = '';
   renderLiveTranscript('');
 
-  if (liveTranscriptUnlisten) {
-    liveTranscriptUnlisten();
-    liveTranscriptUnlisten = null;
-  }
+  // Clean up previous listeners
+  if (liveTranscriptUnlisten) { liveTranscriptUnlisten(); liveTranscriptUnlisten = null; }
+  if (liveErrorUnlisten) { liveErrorUnlisten(); liveErrorUnlisten = null; }
 
   const detailTranscriptEl = document.getElementById('transcript-content');
 
@@ -43,31 +44,36 @@ export async function startLiveTranscript(recordingId) {
     }
   });
 
+  const errorUnlisten = await listen('realtime_transcription_error', (event) => {
+    if (liveTranscriptGeneration !== generation) return;
+    showToast('Live transcription error: ' + event.payload, 'error');
+    if (panel) panel.style.display = 'none';
+  });
+
   if (liveTranscriptGeneration !== generation) {
     unlisten();
+    errorUnlisten();
     return;
   }
   liveTranscriptUnlisten = unlisten;
+  liveErrorUnlisten = errorUnlisten;
 
   try {
     await invoke('start_realtime_transcription', { recordingId });
   } catch (err) {
     if (liveTranscriptGeneration !== generation) return;
     console.error('Failed to start realtime transcription:', err);
+    showToast('Live transcription: ' + err, 'error');
     if (panel) panel.style.display = 'none';
-    if (liveTranscriptUnlisten) {
-      liveTranscriptUnlisten();
-      liveTranscriptUnlisten = null;
-    }
+    if (liveTranscriptUnlisten) { liveTranscriptUnlisten(); liveTranscriptUnlisten = null; }
+    if (liveErrorUnlisten) { liveErrorUnlisten(); liveErrorUnlisten = null; }
   }
 }
 
 export function stopLiveTranscript() {
   liveTranscriptGeneration++;
-  if (liveTranscriptUnlisten) {
-    liveTranscriptUnlisten();
-    liveTranscriptUnlisten = null;
-  }
+  if (liveTranscriptUnlisten) { liveTranscriptUnlisten(); liveTranscriptUnlisten = null; }
+  if (liveErrorUnlisten) { liveErrorUnlisten(); liveErrorUnlisten = null; }
   const panel = document.getElementById('live-transcript-panel');
   if (panel) panel.style.display = 'none';
 }

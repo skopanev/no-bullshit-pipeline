@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::Emitter;
 
 use crate::audio_processing::TRANSCRIPTION_BUFFER;
@@ -73,25 +73,27 @@ fn run_local_transcription(
     recording_id: &str,
     should_stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    use std::os::raw::c_int;
     use whisper_rs::{FullParams, SamplingStrategy};
 
+    log::info!("[rt-whisper] loading model: {}", model_path.display());
     let ctx = crate::transcription::load_whisper_context(model_path)?;
 
     let mut state = ctx
         .create_state()
         .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
+    log::info!("[rt-whisper] model loaded, waiting for audio...");
+
     let mut window: Vec<f32> = Vec::with_capacity(LOCAL_WINDOW_SAMPLES);
-    let mut prompt_tokens: Vec<c_int> = Vec::new();
     let mut committed_text = String::new();
-    let mut was_speaking = false;
     let mut last_text = String::new();
     let mut last_write_len: usize = 0;
+    let mut inference_count: u32 = 0;
 
     let recording_dir = get_data_dir().join(recording_id);
-    let step_interval = std::time::Duration::from_secs(1);
+    let step_interval = std::time::Duration::from_secs(2);
 
+    // Wait for initial audio data
     while !should_stop.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let available = TRANSCRIPTION_BUFFER.available();
@@ -99,6 +101,7 @@ fn run_local_transcription(
             window.extend_from_slice(&TRANSCRIPTION_BUFFER.pop(available));
         }
         if window.len() >= LOCAL_STEP_SAMPLES {
+            log::info!("[rt-whisper] got {} samples, starting transcription loop", window.len());
             break;
         }
     }
@@ -106,109 +109,93 @@ fn run_local_transcription(
     while !should_stop.load(Ordering::Relaxed) {
         let step_start = std::time::Instant::now();
 
+        // Drain buffer
         let available = TRANSCRIPTION_BUFFER.available();
         if available > 0 {
             window.extend_from_slice(&TRANSCRIPTION_BUFFER.pop(available));
         }
 
+        // Keep sliding window bounded
         if window.len() > LOCAL_WINDOW_SAMPLES {
             let excess = window.len() - LOCAL_WINDOW_SAMPLES;
             window.drain(..excess);
         }
 
+        // Simple VAD on the latest chunk
         let vad_start = window.len().saturating_sub(LOCAL_STEP_SAMPLES);
         let is_speaking = compute_rms(&window[vad_start..]) > VAD_RMS_THRESHOLD;
 
-        if is_speaking {
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-            params.set_language(None);
-            params.set_translate(false);
-            params.set_print_progress(false);
-            params.set_print_realtime(false);
-
-            if !prompt_tokens.is_empty() {
-                params.set_tokens(&prompt_tokens);
-            }
-
-            if let Err(e) = state.full(params, &window) {
-                eprintln!("Whisper inference error: {}", e);
-                sleep_remaining(step_start, step_interval, &should_stop);
-                continue;
-            }
-
-            let mut text = String::new();
-            let n_segments = state.full_n_segments();
-            for i in 0..n_segments {
-                if let Some(seg) = state.get_segment(i) {
-                    if let Ok(seg_text) = seg.to_str_lossy() {
-                        text.push_str(&seg_text);
-                    }
-                }
-            }
-            let text = text.trim().to_string();
-
-            if n_segments > 0 {
-                prompt_tokens.clear();
-            }
-
-            if !text.is_empty() && text != last_text {
-                last_text = text;
-                let combined = if committed_text.is_empty() {
-                    last_text.clone()
-                } else {
-                    format!("{} {}", committed_text, last_text)
-                };
-                if combined.len() > last_write_len {
-                    if let Err(e) =
-                        write_transcript_json(&recording_dir, &combined, "whisper-realtime")
-                    {
-                        eprintln!("Failed to write incremental transcript: {}", e);
-                    } else {
-                        last_write_len = combined.len();
-                        let _ = app_handle.emit(
-                            EVENT_TRANSCRIPT_UPDATED,
-                            TranscriptUpdated {
-                                recording_id: recording_id.to_string(),
-                                text: combined,
-                            },
-                        );
-                    }
-                }
-            }
-
-            was_speaking = true;
-        } else if was_speaking {
+        if !is_speaking {
+            // Commit any pending text when silence detected
             if !last_text.is_empty() {
                 if !committed_text.is_empty() {
                     committed_text.push(' ');
                 }
                 committed_text.push_str(&last_text);
                 last_text.clear();
-                prompt_tokens.clear();
             }
-            was_speaking = false;
+            sleep_remaining(step_start, step_interval, &should_stop);
+            continue;
         }
 
-        if committed_text.len() > last_write_len {
-            if let Err(e) =
-                write_transcript_json(&recording_dir, &committed_text, "whisper-realtime")
-            {
-                eprintln!("Failed to write transcript: {}", e);
+        // Optimized params for real-time
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_translate(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_single_segment(true);
+        params.set_no_context(true);
+        params.set_n_threads(4);
+
+        let infer_start = std::time::Instant::now();
+        if let Err(e) = state.full(params, &window) {
+            log::error!("[rt-whisper] inference error: {}", e);
+            sleep_remaining(step_start, step_interval, &should_stop);
+            continue;
+        }
+        inference_count += 1;
+        log::debug!("[rt-whisper] inference #{} took {:?}", inference_count, infer_start.elapsed());
+
+        // Extract text from segments
+        let mut text = String::new();
+        let n_segments = state.full_n_segments();
+        for i in 0..n_segments {
+            if let Some(seg) = state.get_segment(i) {
+                if let Ok(seg_text) = seg.to_str_lossy() {
+                    text.push_str(&seg_text);
+                }
+            }
+        }
+        let text = text.trim().to_string();
+
+        if !text.is_empty() && text != last_text {
+            last_text = text;
+            let combined = if committed_text.is_empty() {
+                last_text.clone()
             } else {
-                last_write_len = committed_text.len();
-                let _ = app_handle.emit(
-                    EVENT_TRANSCRIPT_UPDATED,
-                    TranscriptUpdated {
-                        recording_id: recording_id.to_string(),
-                        text: committed_text.clone(),
-                    },
-                );
+                format!("{} {}", committed_text, last_text)
+            };
+            if combined.len() > last_write_len {
+                if let Err(e) = write_transcript_json(&recording_dir, &combined, "whisper-realtime") {
+                    log::error!("[rt-whisper] failed to write transcript: {}", e);
+                } else {
+                    last_write_len = combined.len();
+                    let _ = app_handle.emit(
+                        EVENT_TRANSCRIPT_UPDATED,
+                        TranscriptUpdated {
+                            recording_id: recording_id.to_string(),
+                            text: combined,
+                        },
+                    );
+                }
             }
         }
 
         sleep_remaining(step_start, step_interval, &should_stop);
     }
 
+    // Flush remaining text
     if !last_text.is_empty() {
         if !committed_text.is_empty() {
             committed_text.push(' ');
@@ -218,7 +205,7 @@ fn run_local_transcription(
 
     if !committed_text.is_empty() {
         if let Err(e) = write_transcript_json(&recording_dir, &committed_text, "whisper-realtime") {
-            eprintln!("Failed to write final transcript: {}", e);
+            log::error!("[rt-whisper] failed to write final transcript: {}", e);
         } else {
             let _ = app_handle.emit(
                 EVENT_TRANSCRIPT_UPDATED,
@@ -230,6 +217,7 @@ fn run_local_transcription(
         }
     }
 
+    log::info!("[rt-whisper] stopped after {} inferences", inference_count);
     Ok(())
 }
 
@@ -299,133 +287,3 @@ fn sleep_remaining(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Managed state and Tauri commands
-// ---------------------------------------------------------------------------
-
-/// Holds active realtime transcriber.
-pub enum ActiveTranscriber {
-    Local(LocalTranscriber),
-}
-
-impl ActiveTranscriber {
-    fn stop(&mut self) {
-        match self {
-            Self::Local(l) => l.stop(),
-        }
-    }
-}
-
-/// Tauri-managed state for the active real-time transcription session.
-pub struct RealtimeTranscriptionState {
-    pub active: Mutex<Option<ActiveTranscriber>>,
-    pub recording_id: Mutex<Option<String>>,
-}
-
-impl RealtimeTranscriptionState {
-    pub fn new() -> Self {
-        Self {
-            active: Mutex::new(None),
-            recording_id: Mutex::new(None),
-        }
-    }
-}
-
-/// Build a model path for local (Whisper) realtime transcription.
-/// Uses the same whisper_model as the main transcription settings.
-fn resolve_local_model_path(settings: &crate::config::AppSettings) -> Result<PathBuf, String> {
-    let size = settings.transcription.whisper_model.clone()
-        .ok_or("No Whisper model configured in settings")?;
-    let url = crate::transcription::get_model_url(&size);
-    let filename = url.split('/').last().unwrap();
-    let path = crate::config::get_models_dir().join(filename);
-    if !path.exists() {
-        return Err(format!("Whisper model not downloaded: {}", path.display()));
-    }
-    Ok(path)
-}
-
-/// Start a transcriber according to the current settings.
-fn do_start(
-    app_handle: tauri::AppHandle,
-    settings: &crate::config::AppSettings,
-    recording_id: Option<String>,
-) -> Result<ActiveTranscriber, String> {
-    let _provider = settings.transcription.realtime_provider.clone();
-    let model_path = resolve_local_model_path(settings)?;
-    let rid = recording_id.unwrap_or_else(|| "unknown-recording".to_string());
-    let transcriber = LocalTranscriber::start(app_handle, model_path, rid)?;
-    Ok(ActiveTranscriber::Local(transcriber))
-}
-
-/// Auto-start real-time transcription if enabled in settings.
-/// Called from the recording lifecycle when a new recording begins.
-/// Failures are logged as warnings and do not abort recording.
-pub fn auto_start(app_handle: &tauri::AppHandle, state: &RealtimeTranscriptionState) {
-    let settings = crate::config::load_settings();
-    if !settings.transcription.realtime_enabled {
-        return;
-    }
-    match do_start(app_handle.clone(), &settings, None) {
-        Ok(transcriber) => {
-            if let Ok(mut guard) = state.active.lock() {
-                *guard = Some(transcriber);
-            }
-        }
-        Err(e) => eprintln!(
-            "WARNING: Failed to auto-start real-time transcription: {}",
-            e
-        ),
-    }
-}
-
-/// Stop any active real-time transcription session.
-/// Called from the recording lifecycle when a recording stops.
-pub fn auto_stop(state: &RealtimeTranscriptionState) {
-    if let Ok(mut guard) = state.active.lock() {
-        if let Some(mut t) = guard.take() {
-            t.stop();
-        }
-    }
-}
-
-/// Start real-time transcription for the given recording.
-/// Checks config for `realtime_enabled` and picks the configured provider/model.
-pub fn start_realtime_transcription(
-    app_handle: tauri::AppHandle,
-    recording_id: String,
-    state: tauri::State<'_, RealtimeTranscriptionState>,
-) -> Result<(), String> {
-    if recording_id.is_empty() {
-        return Err("recording_id must not be empty".to_string());
-    }
-
-    let settings = crate::config::load_settings();
-    if !settings.transcription.realtime_enabled {
-        return Err("Real-time transcription is disabled in settings".to_string());
-    }
-
-    let mut guard = state.active.lock().map_err(|e| e.to_string())?;
-    if let Some(mut t) = guard.take() {
-        t.stop();
-    }
-
-    let transcriber = do_start(app_handle, &settings, Some(recording_id.clone()))?;
-    *guard = Some(transcriber);
-    drop(guard);
-
-    let mut rid_guard = state.recording_id.lock().map_err(|e| e.to_string())?;
-    *rid_guard = Some(recording_id);
-    Ok(())
-}
-
-/// Stop the active real-time transcription session, if any.
-pub fn stop_realtime_transcription(
-    state: tauri::State<'_, RealtimeTranscriptionState>,
-) -> Result<(), String> {
-    let mut guard = state.active.lock().map_err(|e| e.to_string())?;
-    if let Some(mut t) = guard.take() {
-        t.stop();
-    }
-    Ok(())
-}
