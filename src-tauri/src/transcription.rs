@@ -47,26 +47,6 @@ pub(crate) struct TranscriptJson {
     text: Option<String>,
 }
 
-impl TranscriptJson {
-    pub fn new(
-        source: TranscriptSource,
-        model: String,
-        created_at: String,
-        duration_sec: f64,
-        language: Option<String>,
-        text: Option<String>,
-    ) -> Self {
-        Self {
-            source,
-            model,
-            created_at,
-            duration_sec,
-            language,
-            text,
-        }
-    }
-}
-
 #[derive(Clone, Serialize)]
 struct TranscriptionProgress {
     recording_id: String,

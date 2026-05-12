@@ -122,6 +122,10 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         config.sample_format()
     );
 
+    // Fresh meter state per session — last shortcut's mic/level shouldn't
+    // bias the adaptive gain of the next one.
+    PEAK_TRACKER.store(0, Ordering::Relaxed);
+
     let samples: Arc<Mutex<Vec<f32>>> =
         Arc::new(Mutex::new(Vec::with_capacity((sample_rate as usize) * 30)));
     let samples_cb = samples.clone();
@@ -137,20 +141,24 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         let peak = samples.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
         let signal = rms * 0.6 + peak * 0.4;
 
-        // Adaptive gain: track a slowly-decaying running peak of the signal
-        // and normalize current frame to it. Far-field built-in mics and
-        // close BT headsets both end up filling most of the meter without
-        // any device-specific calibration.
-        const FLOOR: f32 = 0.005; // ignore room hiss / DC offset
-        const DECAY: f32 = 0.997; // ~95% retained over 1s of 20ms callbacks
+        // AGC: slowly-decaying running peak compensates for mic sensitivity.
+        // Decay is intentionally slow (~10s window) so it learns the user's
+        // loud syllables and treats them as 0 dB — quieter parts of speech
+        // then show as -10..-30 dB below, giving the meter natural dynamics
+        // between syllables instead of pegging at 100% during speech.
+        const FLOOR: f32 = 0.005;
+        const DECAY: f32 = 0.9995;
         let prev = f32::from_bits(PEAK_TRACKER.load(Ordering::Relaxed));
-        let new_max = (prev * DECAY).max(signal).max(FLOOR);
-        PEAK_TRACKER.store(new_max.to_bits(), Ordering::Relaxed);
+        let agc_max = (prev * DECAY).max(signal).max(FLOOR);
+        PEAK_TRACKER.store(agc_max.to_bits(), Ordering::Relaxed);
 
-        let level = (signal / new_max).clamp(0.0, 1.0);
-        // Mild sqrt curve — small movements still feel visible without
-        // hovering at 100% on every plosive.
-        crate::mic_audio::set_audio_level(level.sqrt());
+        // Convert to dB relative to AGC max (0 dB = current loudness ceiling)
+        // and map a 40 dB range to the 0..1 meter. Speech phonemes naturally
+        // span 20-30 dB → every syllable visibly moves the bar.
+        let gained = (signal / agc_max).max(1e-5);
+        let db = 20.0 * gained.log10();
+        let level = ((db + 40.0) / 40.0).clamp(0.0, 1.0);
+        crate::mic_audio::set_audio_level(level);
     }
 
     let stream = match config.sample_format() {

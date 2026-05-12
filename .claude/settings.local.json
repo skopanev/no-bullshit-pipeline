@@ -15,7 +15,24 @@
       "Bash(bun update:*)",
       "Bash(ls -lh /Users/skopanev/Projects/nbp/builds/*.dmg)",
       "Bash(chmod:*)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "Bash(node:*)",
+      "Bash(wc -l /Users/skopanev/Projects/nbp/src/*.js /Users/skopanev/Projects/nbp/src/vendor/*.js)",
+      "Bash(wc:*)",
+      "Bash(bun add:*)",
+      "Bash(bun:*)",
+      "Read(//tmp/**)",
+      "Bash(stat /Users/skopanev/Projects/nbp/src/*.js)",
+      "Bash(git pull:*)",
+      "Bash(find /Users/skopanev/Projects/nbp/src/js -name \"*.js\" -exec wc -l {} +)",
+      "Bash(ls:*)",
+      "Bash(rustup update *)",
+      "WebFetch(domain:github.com)",
+      "Bash(swift package *)",
+      "Bash(swift build *)",
+      "Bash(GITLAB_HOST=git.otion.us glab ci list --repo healthium/hltm-workflows --status failed)",
+      "Bash(./workflows/ntk-task/scripts/build-apps-json.sh)",
+      "Bash(bash -n workflows/ntk-task/scripts/prepare-workspace.sh)"
     ]
   }
 }

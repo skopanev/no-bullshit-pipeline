@@ -1,7 +1,7 @@
 {
   "name": "nbp",
   "private": true,
-  "version": "0.4.14",
+  "version": "0.4.15",
   "type": "module",
   "scripts": {
     "check": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
@@ -12,7 +12,7 @@
     "check:all": "bun run lint && bun run check:js && bun run check",
     "doctor": "node scripts/doctor.mjs",
     "doctor:rust": "node scripts/doctor.mjs --rust-only",
-    "dev": "bun run build:js:dev && bun run doctor:rust && tauri dev --config src-tauri/tauri.dev.conf.json",
+    "dev": "bun run doctor:rust && node scripts/dev.mjs",
     "build": "bun run build:js && tauri build",
     "tauri": "tauri",
     "build:release": "./build.sh",

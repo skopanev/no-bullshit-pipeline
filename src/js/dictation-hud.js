@@ -40,6 +40,7 @@ const BAR_MAX = 20; // px
 console.log('dictation-hud: script loaded');
 
 let levelTimer = null;
+let waveTimer = null;
 let hideTimer = null;
 // Cache of shortcut_id → hotkey string so we don't re-query settings on every
 // recording start. Populated on demand from the dictation_status payload.
@@ -60,6 +61,7 @@ function scheduleHide(delayMs) {
 
 function startLevelPolling() {
   stopLevelPolling();
+  stopWaveAnimation();
   meter.classList.remove('flat');
   levelTimer = setInterval(async () => {
     try {
@@ -91,6 +93,54 @@ function stopLevelPolling() {
     clearInterval(levelTimer);
     levelTimer = null;
   }
+}
+
+// Pulse-wave animation on the same 5 bars used by the live mic meter — a
+// single peak sweeps L→R, bars go dark, ~2s pause, repeat. Used while we're
+// thinking (transcribing / pipeline / pasting).
+function startWaveAnimation() {
+  stopWaveAnimation();
+  stopLevelPolling();
+  meter.classList.remove('flat');
+  const PASS_MS = 700;
+  const PAUSE_MS = 1000;
+  const CYCLE_MS = PASS_MS + PAUSE_MS;
+  const FRAME_MS = 40; // 25 fps
+  const startTs = Date.now();
+  waveTimer = setInterval(() => {
+    const elapsed = (Date.now() - startTs) % CYCLE_MS;
+    if (elapsed >= PASS_MS) {
+      // Gap between passes — bars sit at min height, dim opacity.
+      bars.forEach((bar) => {
+        bar.style.height = `${BAR_MIN}px`;
+        bar.style.opacity = '0.25';
+      });
+      return;
+    }
+    // Wave pass: a single peak travels from bar 0 to bar (N-1), with a
+    // gaussian falloff per bar so neighbors light up alongside the peak.
+    const t = elapsed / PASS_MS;
+    const peakPos = t * (BAR_COUNT - 1);
+    bars.forEach((bar, i) => {
+      const dist = i - peakPos;
+      const amp = Math.exp(-(dist * dist));
+      const h = BAR_MIN + amp * (BAR_MAX - BAR_MIN);
+      bar.style.height = `${h.toFixed(1)}px`;
+      bar.style.opacity = (0.3 + amp * 0.7).toFixed(2);
+    });
+  }, FRAME_MS);
+}
+
+function stopWaveAnimation() {
+  if (waveTimer) {
+    clearInterval(waveTimer);
+    waveTimer = null;
+  }
+}
+
+function stopAllMeters() {
+  stopLevelPolling();
+  stopWaveAnimation();
   meter.classList.add('flat');
 }
 
@@ -172,43 +222,43 @@ async function onStatus(payload) {
       break;
     case 'reading_clipboard':
       showHud();
-      stopLevelPolling();
       setDot('processing');
       statusEl.textContent = 'Reading clipboard…';
-      meter.style.display = 'none';
+      meter.style.display = '';
+      startWaveAnimation();
       hint.textContent = '';
       setActionButton(null);
       break;
     case 'transcribing':
       showHud();
-      stopLevelPolling();
       setDot('processing');
       statusEl.textContent = 'Transcribing…';
       meter.style.display = '';
+      startWaveAnimation();
       hint.textContent = 'one sec';
       setActionButton(null);
       break;
     case 'processing':
       showHud();
-      stopLevelPolling();
       setDot('processing');
       statusEl.textContent = 'Processing pipeline…';
-      meter.style.display = 'none';
+      meter.style.display = '';
+      startWaveAnimation();
       hint.textContent = 'running LLM steps';
       setActionButton(null);
       break;
     case 'pasting':
       showHud();
-      stopLevelPolling();
       setDot('processing');
       statusEl.textContent = 'Pasting…';
-      meter.style.display = 'none';
+      meter.style.display = '';
+      startWaveAnimation();
       hint.textContent = '';
       setActionButton(null);
       break;
     case 'accessibility_needed':
       showHud();
-      stopLevelPolling();
+      stopAllMeters();
       setDot('error');
       statusEl.textContent = 'Accessibility needed';
       meter.style.display = 'none';
@@ -224,7 +274,7 @@ async function onStatus(payload) {
       break;
     case 'pipeline_error':
       showHud();
-      stopLevelPolling();
+      stopAllMeters();
       setDot('error');
       statusEl.textContent = 'Pipeline failed';
       meter.style.display = 'none';
@@ -234,7 +284,7 @@ async function onStatus(payload) {
       break;
     case 'error':
       showHud();
-      stopLevelPolling();
+      stopAllMeters();
       setDot('error');
       statusEl.textContent = message || 'Error';
       meter.style.display = 'none';
@@ -244,7 +294,7 @@ async function onStatus(payload) {
       break;
     case 'idle':
     default:
-      stopLevelPolling();
+      stopAllMeters();
       setDot('done');
       statusEl.textContent = message || 'Done';
       hint.textContent = '';

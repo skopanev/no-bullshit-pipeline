@@ -504,15 +504,34 @@ fn run_detector(should_stop: Arc<AtomicBool>, app_handle: tauri::AppHandle) {
 
         // Transition: not-running → running (call started)
         if is_running && !was_running {
-            let since_last = last_notification.elapsed();
-            if since_last >= Duration::from_secs(DEBOUNCE_SECS) {
-                let call_app = detect_call_app();
-                let pipeline_names = get_pipeline_names();
+            // Skip if WE opened the mic — Quick Dictate or main recording
+            // currently active. Otherwise pressing our own shortcut fires a
+            // bogus "call detected" notification.
+            let dictation_active = tauri::Manager::state::<crate::dictation::DictationState>(&app_handle)
+                .is_active
+                .load(Ordering::Relaxed);
+            let recording_active = tauri::Manager::state::<crate::audio::AudioState>(&app_handle)
+                .is_recording
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(false);
+            if dictation_active || recording_active {
+                log::info!(
+                    "call_detector: mic activated by NBP itself (dictation={}, recording={}) — skipping notification",
+                    dictation_active,
+                    recording_active
+                );
+            } else {
+                let since_last = last_notification.elapsed();
+                if since_last >= Duration::from_secs(DEBOUNCE_SECS) {
+                    let call_app = detect_call_app();
+                    let pipeline_names = get_pipeline_names();
 
-                log::info!("call_detector: mic activated, app={:?}", call_app);
+                    log::info!("call_detector: mic activated, app={:?}", call_app);
 
-                send_notification(&app_handle, call_app.as_deref(), &pipeline_names);
-                last_notification = Instant::now();
+                    send_notification(&app_handle, call_app.as_deref(), &pipeline_names);
+                    last_notification = Instant::now();
+                }
             }
         }
 
