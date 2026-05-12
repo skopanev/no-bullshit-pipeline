@@ -15,7 +15,7 @@ pub struct AudioState {
     pub start_timestamp: Mutex<Option<SystemTime>>,
     pub save_mix_only: Mutex<bool>,
     pub finalization_handle: Mutex<Option<JoinHandle<()>>>,
-    pub realtime_transcriber: Mutex<Option<crate::realtime_transcription::LocalTranscriber>>,
+    pub realtime_transcriber: Mutex<Option<Box<dyn crate::realtime_transcription::RealtimeTranscriberHandle>>>,
     pub silence_monitor_stop: Mutex<Option<Arc<AtomicBool>>>,
 }
 
@@ -410,8 +410,10 @@ fn finalize_recording(id: &str, duration_sec: f64, save_mix_only: bool) {
 /// Start real-time transcription for the given recording.
 ///
 /// Validates that `recording_id` matches the currently active session to prevent
-/// stale IDs from hijacking a running transcription. Uses local Whisper model only.
-/// No-ops if real-time transcription is disabled in settings.
+/// stale IDs from hijacking a running transcription. Dispatches to the streaming
+/// backend matching the configured transcription provider (currently AppleSpeech;
+/// FluidAudio streaming arrives in a follow-up). No-ops if the selected provider
+/// has no streaming sidecar.
 #[tauri::command]
 pub async fn start_realtime_transcription(
     recording_id: String,
@@ -450,11 +452,24 @@ pub async fn start_realtime_transcription(
         }
     }
 
-    // Realtime transcription is temporarily disabled — whisper-rs was removed
-    // and the FluidAudio/Apple streaming providers haven't landed yet. We
-    // accept the start call quietly so the recording flow doesn't error;
-    // the user just won't see live transcript until streaming is back.
-    let _ = (rt_config, app_handle, recording_id);
+    use crate::config::TranscriptionProvider;
+    use crate::realtime_transcription::{AppleSpeechRealtimeTranscriber, RealtimeTranscriberHandle};
+
+    let new_transcriber: Option<Box<dyn RealtimeTranscriberHandle>> = match rt_config.provider {
+        TranscriptionProvider::AppleSpeech => {
+            let t = AppleSpeechRealtimeTranscriber::start(app_handle, recording_id)?;
+            Some(Box::new(t))
+        }
+        // FluidAudio streaming arrives in a follow-up ticket; accept the call
+        // silently so the recording flow keeps working when its variant is
+        // selected without a sidecar wired up yet.
+        _ => None,
+    };
+
+    if let Some(t) = new_transcriber {
+        let mut guard = state.realtime_transcriber.lock().map_err(|e| e.to_string())?;
+        *guard = Some(t);
+    }
     Ok(())
 }
 

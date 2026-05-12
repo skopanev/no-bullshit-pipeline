@@ -65,7 +65,7 @@ export function updateTranscriptionKeyStatusDot() {
 export async function updateProviderVisibility() {
   if (!transcriptionProviderSelect) return;
   const provider = transcriptionProviderSelect.value;
-  const isCloud = provider !== 'FluidAudio';
+  const isCloud = provider !== 'FluidAudio' && provider !== 'AppleSpeech';
 
   const statusEl = document.getElementById('cloud-provider-status');
   const setKeyBtn = document.getElementById('set-api-key-btn');
