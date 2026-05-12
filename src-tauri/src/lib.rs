@@ -616,6 +616,9 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
+    // Accept the very first click on the (initially un-focused) window so the
+    // user can grab and drag without an extra focus tap.
+    .accept_first_mouse(true)
     .visible(true)
     .resizable(false)
     .shadow(false);
@@ -640,6 +643,23 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
         if let Err(e) = window.set_visible_on_all_workspaces(true) {
             log::warn!("dictation-hud: set_visible_on_all_workspaces failed: {}", e);
         }
+
+        // Borderless NSWindows default to isMovable = false on macOS; without
+        // these flags neither CSS `-webkit-app-region: drag` nor JS
+        // startDragging() actually moves the window. Flip them on directly via
+        // the NSWindow handle.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            if let Ok(ns_window_ptr) = window.ns_window() {
+                let ns_window: *mut objc2::runtime::AnyObject =
+                    ns_window_ptr as *mut objc2::runtime::AnyObject;
+                if !ns_window.is_null() {
+                    let _: () = objc2::msg_send![ns_window, setMovable: true];
+                    let _: () = objc2::msg_send![ns_window, setMovableByWindowBackground: true];
+                }
+            }
+        }
+
         // Initial position: cursor monitor, top-center.
         reposition_dictation_hud(app);
     }

@@ -48,7 +48,11 @@
       flex-direction: column;
       gap: 8px;
       box-shadow: 0 10px 30px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.06) inset;
+      /* Whole card is grab-and-drag; interactive bits opt out via no-drag */
+      -webkit-app-region: drag;
+      cursor: grab;
     }
+    .card:active { cursor: grabbing; }
     .row {
       display: flex;
       align-items: center;
@@ -104,6 +108,8 @@
       align-items: center;
       justify-content: center;
       gap: 4px;
+      /* Meter is purely visual — keep drag enabled on top of it */
+      -webkit-app-region: drag;
     }
     .bar {
       width: 4px;

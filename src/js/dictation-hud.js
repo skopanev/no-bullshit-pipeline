@@ -7,14 +7,31 @@
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+// Native Window handle — used for startDragging() which talks straight to
+// NSWindow. CSS `-webkit-app-region: drag` is unreliable on wry/macOS with
+// transparent + non-decorated windows, so we drive the drag from JS instead.
+const windowApi = window.__TAURI__.window || {};
+const getHud = windowApi.getCurrentWindow || windowApi.getCurrent;
+const hud = typeof getHud === 'function' ? getHud() : null;
 
 const body = document.body;
+const card = document.getElementById('card');
 const dot = document.getElementById('dot');
 const statusEl = document.getElementById('status');
 const meter = document.getElementById('meter');
 const bars = Array.from(meter.querySelectorAll('.bar'));
 const hint = document.getElementById('hint');
 const actionBtn = document.getElementById('action-btn');
+
+if (card && hud && typeof hud.startDragging === 'function') {
+  card.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    // Let interactive controls handle their own clicks
+    if (e.target.closest('button, a, input, select, textarea, [data-no-drag]')) return;
+    e.preventDefault();
+    hud.startDragging().catch((err) => console.error('startDragging failed', err));
+  });
+}
 
 const BAR_COUNT = bars.length;
 const BAR_MIN = 4; // px
