@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "nbp",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "identifier": "one.nbp.skk",
   "build": {
     "frontendDist": "../src"
   },
   "app": {
+    "macOSPrivateApi": true,
     "withGlobalTauri": true,
     "windows": [
       {

@@ -451,13 +451,9 @@ pub async fn start_realtime_transcription(
     }
 
     use crate::realtime_transcription::LocalTranscriber;
-    use crate::transcription::get_model_url;
 
-    let model_size = rt_config.whisper_model.clone()
-        .unwrap_or(crate::config::WhisperModelSize::Base);
-    let url = get_model_url(&model_size);
-    let filename = url.split('/').last().unwrap_or("ggml-base.bin");
-    let model_path = crate::config::get_models_dir().join(filename);
+    let model_size = rt_config.whisper_model.clone().unwrap_or_default();
+    let model_path = crate::config::get_models_dir().join(model_size.filename());
 
     let transcriber = LocalTranscriber::start(app_handle, model_path, recording_id)?;
 

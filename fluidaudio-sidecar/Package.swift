@@ -5,7 +5,7 @@ let package = Package(
     name: "fluidaudio-sidecar",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.14.5"),
     ],
     targets: [
         .executableTarget(

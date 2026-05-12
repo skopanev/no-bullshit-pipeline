@@ -106,6 +106,15 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            // Persist window size/position/maximized state across launches.
+            // Exclude the dictation HUD — we position it manually each session
+            // (top-center of primary monitor) and don't want its tiny size to
+            // be remembered as the main window's state by mistake.
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(|label| label != "dictation-hud")
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .manage(AudioState::new())
@@ -205,6 +214,11 @@ pub fn run() {
             // Build system tray menu
             build_tray(app)?;
 
+            // Quick Dictate floating HUD — small always-on-top window, hidden
+            // until a shortcut fires. Pre-create so the page is loaded and
+            // listening for dictation_status events at startup.
+            build_dictation_hud(app.handle())?;
+
             // Quick Dictate: init plugin (always, even if disabled — so reload works
             // at runtime without restart). Shortcuts are then registered if enabled.
             #[cfg(desktop)]
@@ -256,6 +270,7 @@ pub fn run() {
             config::load_settings,
             config::save_settings,
             transcription::get_whisper_models_info,
+            transcription::list_whisper_models_remote,
             transcription::download_whisper_model,
             transcription::delete_whisper_model,
             transcription::transcribe_recording,
@@ -349,6 +364,11 @@ pub fn run() {
             dictation::dictation_toggle,
             dictation::dictation_is_active,
             dictation::dictation_reload_shortcuts,
+            dictation::dictation_get_registration_status,
+            open_accessibility_settings,
+            is_accessibility_granted,
+            request_accessibility_permission,
+            restart_app,
         ])
         .on_window_event(|window, event| {
             match event {
@@ -395,6 +415,8 @@ pub fn reload_dictation_shortcuts(
 
     let settings = config::load_settings();
     let mut results: Vec<ShortcutRegistration> = Vec::with_capacity(settings.dictation.shortcuts.len());
+    // Cache the result so the frontend can poll status without re-registering
+    let cache_arc = app.state::<dictation::DictationState>();
 
     if !settings.dictation.enabled {
         log::info!("dictation: disabled — no shortcuts registered");
@@ -405,6 +427,9 @@ pub fn reload_dictation_shortcuts(
                 status: "disabled".into(),
                 error: None,
             });
+        }
+        if let Ok(mut cache) = cache_arc.last_registration.lock() {
+            *cache = results.clone();
         }
         return Ok(results);
     }
@@ -422,11 +447,20 @@ pub fn reload_dictation_shortcuts(
         let sid = sc.id.clone();
         let name = sc.name.clone();
         let hotkey = sc.hotkey.clone();
+        let is_clipboard_source =
+            matches!(sc.input_source, config::DictationInputSource::Clipboard);
         let result = gs.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 let app = app.clone();
                 let sid = sid.clone();
                 tauri::async_runtime::spawn(async move {
+                    if is_clipboard_source {
+                        // One-shot: snapshot clipboard → pipeline → paste. No toggle.
+                        if let Err(e) = dictation::run_clipboard_inner(&app, &sid).await {
+                            log::warn!("dictation clipboard '{}' failed: {}", sid, e);
+                        }
+                        return;
+                    }
                     let active = app
                         .state::<dictation::DictationState>()
                         .is_active
@@ -464,7 +498,102 @@ pub fn reload_dictation_shortcuts(
             }
         }
     }
+    if let Ok(mut cache) = cache_arc.last_registration.lock() {
+        *cache = results.clone();
+    }
     Ok(results)
+}
+
+/// Open System Settings → Privacy & Security → Accessibility so the user can
+/// grant the permission required for the ⌘V auto-paste keystroke.
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Check whether NBP is in the macOS Accessibility allow-list. Lightweight,
+/// no UI prompt. Backed by ApplicationServices' AXIsProcessTrusted.
+#[tauri::command]
+fn is_accessibility_granted() -> bool {
+    dictation::is_ax_trusted()
+}
+
+/// Trigger the system Accessibility-permission prompt for NBP. Returns the
+/// current trusted state. macOS only shows the dialog once; afterwards this
+/// just returns the cached status.
+#[tauri::command]
+fn request_accessibility_permission() -> bool {
+    dictation::request_ax_prompt()
+}
+
+/// Cleanly restart NBP. Useful after granting Accessibility permission since
+/// macOS caches the `AXIsProcessTrusted` result per-process — without a
+/// restart the running app keeps thinking it's untrusted even after the user
+/// flipped the toggle in System Settings.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
+fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    if app.get_webview_window("dictation-hud").is_some() {
+        log::info!("dictation-hud: window already exists, skip");
+        return Ok(());
+    }
+    // The HUD stays `visible: true` at the window level — visibility is
+    // controlled by CSS on the body element. On macOS, a `visible: false` +
+    // transparent + .show() combo has triggered cases where the WebView never
+    // paints. Keeping it visible + transparent + 0-opacity body avoids that
+    // and gives instant show/hide via a single class toggle.
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        "dictation-hud",
+        WebviewUrl::App("dictation-hud.html".into()),
+    )
+    .title("")
+    .inner_size(340.0, 96.0)
+    .position(0.0, 0.0)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(true)
+    .resizable(false)
+    .shadow(false);
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.devtools(true);
+    }
+
+    match builder.build()
+    {
+        Ok(_) => log::info!("dictation-hud: window created"),
+        Err(e) => {
+            log::error!("dictation-hud: window build failed: {}", e);
+            return Err(Box::new(e));
+        }
+    }
+
+    // Center the HUD near the top of the primary monitor (system-dictation feel)
+    if let Some(window) = app.get_webview_window("dictation-hud") {
+        if let Ok(Some(monitor)) = window.primary_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let hud_w = 340.0_f64;
+            let x = (size.width as f64 / scale - hud_w) / 2.0;
+            let y = size.height as f64 / scale * 0.12; // ~12% from top
+            let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+            log::info!("dictation-hud: positioned at ({:.0}, {:.0})", x, y);
+        }
+    }
+    Ok(())
 }
 
 /// Show the main window and restore dock presence

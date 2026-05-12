@@ -24,8 +24,10 @@ lazy_static::lazy_static! {
     static ref CURRENT_AUDIO_LEVEL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 }
 
-/// Set the current audio level (0.0 - 1.0)
-fn set_audio_level(level: f32) {
+/// Set the current audio level (0.0 - 1.0). Used by both the main mic-capture
+/// pipeline and the Quick Dictate ephemeral stream so the UI meter reads from
+/// a single source of truth.
+pub(crate) fn set_audio_level(level: f32) {
     let level_u32 = level.clamp(0.0, 1.0).to_bits();
     CURRENT_AUDIO_LEVEL.store(level_u32, Ordering::Relaxed);
 }

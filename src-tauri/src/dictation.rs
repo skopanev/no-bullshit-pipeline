@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::config::{
     get_api_key_for_provider, get_models_dir, load_settings, DictationShortcut,
-    TranscriptionProvider, WhisperModelSize,
+    TranscriptionProvider,
 };
 use crate::pipelines::{load_pipelines, ConnectorType};
 
@@ -20,6 +20,7 @@ const TARGET_RATE: u32 = 16_000;
 pub struct DictationState {
     pub is_active: Arc<AtomicBool>,
     inner: Mutex<Option<Session>>,
+    pub last_registration: Mutex<Vec<crate::ShortcutRegistration>>,
 }
 
 struct Session {
@@ -40,8 +41,18 @@ impl DictationState {
         Self {
             is_active: Arc::new(AtomicBool::new(false)),
             inner: Mutex::new(None),
+            last_registration: Mutex::new(Vec::new()),
         }
     }
+}
+
+/// Read-only snapshot of the most recent shortcut-registration result, used
+/// by the frontend to render status badges without triggering a re-register.
+#[tauri::command]
+pub fn dictation_get_registration_status(
+    state: tauri::State<'_, DictationState>,
+) -> Vec<crate::ShortcutRegistration> {
+    state.last_registration.lock().map(|g| g.clone()).unwrap_or_default()
 }
 
 #[derive(Clone, Serialize)]
@@ -100,10 +111,23 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
 
     let err_fn = |err| log::error!("dictation cpal stream error: {}", err);
 
+    fn push_level(samples: &[f32]) {
+        if samples.is_empty() {
+            return;
+        }
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        let rms = (sum_sq / samples.len() as f32).sqrt();
+        // Match the visualisation curve used by the main mic pipeline:
+        // sqrt-compressed so quiet speech still moves the meter visibly.
+        let scaled = (rms * 4.0).sqrt().min(1.0);
+        crate::mic_audio::set_audio_level(scaled);
+    }
+
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &_| {
+                push_level(data);
                 if let Ok(mut buf) = samples_cb.lock() {
                     buf.extend_from_slice(data);
                 }
@@ -114,8 +138,10 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         cpal::SampleFormat::I16 => device.build_input_stream(
             &config.into(),
             move |data: &[i16], _: &_| {
+                let f: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                push_level(&f);
                 if let Ok(mut buf) = samples_cb.lock() {
-                    buf.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
+                    buf.extend_from_slice(&f);
                 }
             },
             err_fn,
@@ -124,11 +150,13 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         cpal::SampleFormat::U16 => device.build_input_stream(
             &config.into(),
             move |data: &[u16], _: &_| {
+                let f: Vec<f32> = data
+                    .iter()
+                    .map(|&s| (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))
+                    .collect();
+                push_level(&f);
                 if let Ok(mut buf) = samples_cb.lock() {
-                    buf.extend(
-                        data.iter()
-                            .map(|&s| (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)),
-                    );
+                    buf.extend_from_slice(&f);
                 }
             },
             err_fn,
@@ -228,13 +256,46 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
         return Ok(String::new());
     }
 
+    process_and_deliver(app, &shortcut, trimmed).await
+}
+
+/// Trigger flow for Clipboard-input shortcuts: snapshot the pasteboard, run
+/// the pipeline if configured, and paste the result back. No mic capture.
+pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<String, String> {
+    let shortcut = find_shortcut(shortcut_id)
+        .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
+
+    emit_status(app, "reading_clipboard", Some(&shortcut.id), None);
+    let text = read_clipboard().map_err(|e| {
+        emit_status(app, "error", Some(&shortcut.id), Some(format!("Clipboard read failed: {}", e)));
+        e
+    })?;
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        emit_status(app, "idle", Some(&shortcut.id), Some("Clipboard is empty".into()));
+        return Ok(String::new());
+    }
+
+    process_and_deliver(app, &shortcut, trimmed).await
+}
+
+/// Shared tail of both Audio and Clipboard flows: run the LLM pipeline (if any)
+/// against `text`, then paste / copy the result. Emits status events along the
+/// way. Returns the final text that was delivered.
+async fn process_and_deliver(
+    app: &AppHandle,
+    shortcut: &DictationShortcut,
+    input_text: String,
+) -> Result<String, String> {
+    let shortcut_id = shortcut.id.clone();
+
     let final_text = if let Some(ref pipeline_name) = shortcut.pipeline {
         emit_status(app, "processing", Some(&shortcut_id), None);
-        match run_text_pipeline(&trimmed, pipeline_name).await {
+        match run_text_pipeline(&input_text, pipeline_name).await {
             Ok(processed) => processed,
             Err(e) => {
                 log::warn!(
-                    "dictation: pipeline '{}' failed: {} — falling back to raw transcript",
+                    "dictation: pipeline '{}' failed: {} — falling back to raw input",
                     pipeline_name,
                     e
                 );
@@ -244,11 +305,11 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
                     Some(&shortcut_id),
                     Some(format!("Pipeline failed, pasted raw: {}", e)),
                 );
-                trimmed.clone()
+                input_text.clone()
             }
         }
     } else {
-        trimmed.clone()
+        input_text.clone()
     };
 
     let final_trimmed = final_text.trim().to_string();
@@ -259,10 +320,25 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
 
     if shortcut.auto_paste {
         emit_status(app, "pasting", Some(&shortcut_id), None);
-        if let Err(e) = paste_text(&final_trimmed) {
-            log::warn!("dictation paste failed: {}", e);
-            emit_status(app, "error", Some(&shortcut_id), Some(format!("Paste failed: {}", e)));
-            return Err(format!("Paste failed: {}", e));
+        match paste_text(&final_trimmed) {
+            Ok(()) => {}
+            Err(PasteError::AccessibilityDenied) => {
+                log::warn!(
+                    "dictation: Accessibility permission missing — text in clipboard only"
+                );
+                emit_status(app, "accessibility_needed", Some(&shortcut_id), None);
+                return Ok(final_trimmed);
+            }
+            Err(PasteError::Other(e)) => {
+                log::warn!("dictation paste failed: {}", e);
+                emit_status(
+                    app,
+                    "error",
+                    Some(&shortcut_id),
+                    Some(format!("Paste failed: {}", e)),
+                );
+                return Err(format!("Paste failed: {}", e));
+            }
         }
     } else if let Err(e) = copy_to_clipboard(&final_trimmed) {
         log::warn!("dictation clipboard failed: {}", e);
@@ -280,15 +356,10 @@ async fn transcribe(
 ) -> Result<String, String> {
     match &shortcut.engine {
         TranscriptionProvider::LocalWhisper => {
-            let model_size = shortcut
-                .whisper_model
-                .clone()
-                .unwrap_or(WhisperModelSize::Base);
-            let url = crate::transcription::get_model_url(&model_size);
-            let filename = url.split('/').last().unwrap_or("ggml-base.bin");
-            let model_path = get_models_dir().join(filename);
+            let model_size = shortcut.whisper_model.clone().unwrap_or_default();
+            let model_path = get_models_dir().join(model_size.filename());
             if !model_path.exists() {
-                return Err(format!("Whisper model not downloaded: {:?}", model_size));
+                return Err(format!("Whisper model not downloaded: {}", model_size.filename()));
             }
             tokio::task::spawn_blocking(move || run_local_whisper(&model_path, &mono_16k))
                 .await
@@ -550,6 +621,16 @@ async fn run_fluidaudio(app: &AppHandle, samples_16k: &[f32]) -> Result<String, 
     Ok(out.text)
 }
 
+fn read_clipboard() -> Result<String, String> {
+    let output = std::process::Command::new("pbpaste")
+        .output()
+        .map_err(|e| format!("pbpaste spawn: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("pbpaste exit {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
     let mut child = std::process::Command::new("pbcopy")
@@ -567,16 +648,93 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn paste_text(text: &str) -> Result<(), String> {
-    copy_to_clipboard(text)?;
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    let status = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(r#"tell application "System Events" to keystroke "v" using command down"#)
-        .status()
-        .map_err(|e| format!("osascript spawn: {}", e))?;
-    if !status.success() {
-        return Err(format!("osascript exit {}", status));
+enum PasteError {
+    /// Accessibility permission is not granted to NBP — CGEventPost would
+    /// silently no-op. Text stays in the clipboard for the user to paste
+    /// manually with ⌘V.
+    AccessibilityDenied,
+    Other(String),
+}
+
+// --- macOS Accessibility + key-posting FFI -------------------------------
+//
+// Posting ⌘V directly via CGEventPost in this process is critical: macOS
+// associates the Accessibility prompt with the bundle that calls
+// AXIsProcessTrustedWithOptions / CGEvent. Spawning `osascript` instead
+// would attribute the request to /usr/bin/osascript and the user would
+// never see a prompt asking to trust NBP itself.
+//
+// AXIsProcessTrustedWithOptions lives in ApplicationServices.framework.
+// CGEvent* APIs live in the same framework.
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    fn CGEventCreateKeyboardEvent(
+        source: *const std::ffi::c_void,
+        virtual_key: u16,
+        key_down: bool,
+    ) -> *const std::ffi::c_void;
+    fn CGEventSetFlags(event: *const std::ffi::c_void, flags: u64);
+    fn CGEventPost(tap: u32, event: *const std::ffi::c_void);
+    fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+const KEY_V: u16 = 9; // ANSI 'v' virtual key
+const CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x100000;
+const CG_HID_EVENT_TAP: u32 = 0;
+
+pub fn is_ax_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Trigger the macOS Accessibility permission prompt for NBP. Returns the
+/// current trusted state. macOS displays the dialog only the first time;
+/// subsequent calls just return the current state.
+pub fn request_ax_prompt() -> bool {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::ClassType;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString};
+
+    let key = NSString::from_str("AXTrustedCheckOptionPrompt");
+    let value = NSNumber::new_bool(true);
+
+    // NSDictionary::from_slices needs an unresolvable CopiedKey generic for our
+    // call site; use the canonical Cocoa class method instead.
+    let dict: Retained<NSDictionary<NSString, NSNumber>> = unsafe {
+        let cls = NSDictionary::<NSString, NSNumber>::class();
+        msg_send![cls, dictionaryWithObject: &*value, forKey: &*key]
+    };
+    let ptr = Retained::as_ptr(&dict) as *const AnyObject as *const std::ffi::c_void;
+    unsafe { AXIsProcessTrustedWithOptions(ptr) }
+}
+
+fn post_cmd_v() {
+    unsafe {
+        let down = CGEventCreateKeyboardEvent(std::ptr::null(), KEY_V, true);
+        if !down.is_null() {
+            CGEventSetFlags(down, CG_EVENT_FLAG_MASK_COMMAND);
+            CGEventPost(CG_HID_EVENT_TAP, down);
+            CFRelease(down);
+        }
+        let up = CGEventCreateKeyboardEvent(std::ptr::null(), KEY_V, false);
+        if !up.is_null() {
+            CGEventSetFlags(up, CG_EVENT_FLAG_MASK_COMMAND);
+            CGEventPost(CG_HID_EVENT_TAP, up);
+            CFRelease(up);
+        }
     }
+}
+
+fn paste_text(text: &str) -> Result<(), PasteError> {
+    copy_to_clipboard(text).map_err(PasteError::Other)?;
+    if !is_ax_trusted() {
+        return Err(PasteError::AccessibilityDenied);
+    }
+    // Tiny delay to let the pasteboard settle before the keystroke
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    post_cmd_v();
     Ok(())
 }

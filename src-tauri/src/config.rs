@@ -120,13 +120,48 @@ impl ProviderConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub enum WhisperModelSize {
-    Tiny,
-    Base,
-    Small,
-    Medium,
-    Large,
+/// Default Whisper model filename used as a fallback everywhere a model isn't
+/// explicitly configured. Single source of truth for the canonical default.
+pub const DEFAULT_WHISPER_MODEL: &str = "ggml-base.bin";
+
+/// Whisper model identifier — a bare ggml filename, e.g. "ggml-base.bin",
+/// "ggml-large-v3-turbo.bin", "ggml-base-q5_0.bin". The catalog of available
+/// models is fetched dynamically from huggingface.co/ggerganov/whisper.cpp.
+///
+/// Backwards compat: old configs storing the legacy enum names ("Tiny" /
+/// "Base" / "Small" / "Medium" / "Large") are auto-migrated on deserialize.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct WhisperModelSize(pub String);
+
+impl WhisperModelSize {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    /// The bare filename as stored in `~/.nbp/models/`
+    pub fn filename(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for WhisperModelSize {
+    fn default() -> Self {
+        Self(DEFAULT_WHISPER_MODEL.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WhisperModelSize {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let migrated = match s.as_str() {
+            "Tiny" => "ggml-tiny.bin".to_string(),
+            "Base" => "ggml-base.bin".to_string(),
+            "Small" => "ggml-small.bin".to_string(),
+            "Medium" => "ggml-medium.bin".to_string(),
+            "Large" => "ggml-large-v3.bin".to_string(),
+            _ => s,
+        };
+        Ok(WhisperModelSize(migrated))
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -161,7 +196,7 @@ impl Default for TranscriptionConfig {
         Self {
             enabled: true,
             provider: TranscriptionProvider::FluidAudio,
-            whisper_model: Some(WhisperModelSize::Base),
+            whisper_model: Some(WhisperModelSize::default()),
             api_keys: ApiKeys::default(),
             api_key: None,
             realtime_enabled: false,
@@ -234,6 +269,16 @@ pub struct DictationConfig {
     pub shortcuts: Vec<DictationShortcut>,
 }
 
+/// What feeds into the pipeline / paste step:
+/// - `Audio` — record mic, transcribe, then run pipeline / paste (classic mode)
+/// - `Clipboard` — snapshot the current pasteboard text, skip mic, run pipeline / paste
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub enum DictationInputSource {
+    #[default]
+    Audio,
+    Clipboard,
+}
+
 /// One Quick Dictate shortcut configuration.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct DictationShortcut {
@@ -244,7 +289,10 @@ pub struct DictationShortcut {
     pub name: String,
     /// Global hotkey string in tauri-plugin-global-shortcut format, e.g. "cmd+shift+d"
     pub hotkey: String,
-    /// Transcription engine for this shortcut
+    /// Where this shortcut's input comes from
+    #[serde(default)]
+    pub input_source: DictationInputSource,
+    /// Transcription engine for this shortcut (only used when input_source = Audio)
     #[serde(default = "default_dictation_engine")]
     pub engine: TranscriptionProvider,
     /// Whisper model when engine = LocalWhisper

@@ -3,6 +3,7 @@ import * as state from '../core/state.js';
 import { showConfirm } from '../ui/confirm-modal.js';
 import { isKeyMasked } from '../core/utils.js';
 import { showToast } from '../ui/toast.js';
+import { DEFAULT_WHISPER_MODEL } from '../core/constants.js';
 
 const transcriptionEnabledCheckbox = document.getElementById('settings-transcription-enabled');
 const transcriptionDetailsEl = document.getElementById('transcription-details');
@@ -85,20 +86,36 @@ export async function updateProviderVisibility() {
   }
 }
 
+function prettyModelName(filename) {
+  // ggml-large-v3-turbo.bin \u2192 Large v3-turbo
+  let s = filename.replace(/^ggml-/, '').replace(/\.bin$/, '');
+  s = s.replace(/-/g, ' ').replace(/\bv(\d)/, 'v$1');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '';
+  if (bytes >= 1024 * 1024 * 1024) return `~${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  return `~${Math.round(bytes / 1024 / 1024)} MB`;
+}
+
 async function loadWhisperModelsAndState() {
   if (!whisperModelSelect) return;
   whisperModelSelect.disabled = true;
   try {
-    availableModels = await invoke('get_whisper_models_info');
-    const currentVal = state.appSettings?.transcription?.whisper_model || whisperModelSelect.value || 'Base';
+    availableModels = await invoke('list_whisper_models_remote', { limit: 10 });
+    const currentVal = state.appSettings?.transcription?.whisper_model || DEFAULT_WHISPER_MODEL;
     whisperModelSelect.innerHTML = availableModels.map(m => {
-      const sizeStr = m.size_mb ? `(~${m.size_mb} MB)` : '';
+      const sizeStr = formatSize(m.size_bytes);
       const statusIcon = m.downloaded ? '\u2713' : '\u2193';
-      let label = `${statusIcon} ${m.size} ${sizeStr}`;
-      if (m.size === 'Base') label += ' (Recommended)';
-      if (m.size === 'Large') label += ' (Best Quality)';
-      return `<option value="${m.size}">${label}</option>`;
+      const label = `${statusIcon} ${prettyModelName(m.filename)} ${sizeStr}`.trim();
+      return `<option value="${m.filename}">${label}</option>`;
     }).join('');
+    // If the saved value isn't in the fresh list, keep it as a stale entry
+    if (currentVal && !availableModels.some(m => m.filename === currentVal)) {
+      whisperModelSelect.insertAdjacentHTML('beforeend',
+        `<option value="${currentVal}">${prettyModelName(currentVal)} (current)</option>`);
+    }
     whisperModelSelect.value = currentVal;
     updateDownloadButton();
   } catch (e) { console.error(e); }
@@ -119,7 +136,7 @@ function getPiePath(cx, cy, r, percentage) {
 function updateDownloadButton() {
   if (!downloadModelBtn || !whisperModelSelect) return;
   if (downloadModelBtn.dataset.downloading === 'true') return;
-  const model = availableModels.find(m => m.size === whisperModelSelect.value);
+  const model = availableModels.find(m => m.filename === whisperModelSelect.value);
   if (!model) return;
 
   if (model.downloaded) {
@@ -145,12 +162,12 @@ export function initTranscriptionSettings() {
   if (downloadModelBtn) {
     downloadModelBtn.addEventListener('click', async () => {
       if (!whisperModelSelect) return;
-      const size = whisperModelSelect.value;
+      const size = whisperModelSelect.value; // filename like "ggml-base.bin"
       const action = downloadModelBtn.dataset.action;
       if (downloadModelBtn.dataset.downloading === 'true') return;
 
       if (action === 'delete') {
-        const ok = await showConfirm('Delete Model?', `Delete the ${size} model?`);
+        const ok = await showConfirm('Delete Model?', `Delete ${prettyModelName(size)}?`);
         if (!ok) return;
         try { await invoke('delete_whisper_model', { size }); await loadWhisperModelsAndState(); } catch (err) { console.error('Delete failed:', err); }
         return;
@@ -196,7 +213,7 @@ export function applyTranscriptionSettings() {
   if (!state.appSettings?.transcription) return;
   if (transcriptionEnabledCheckbox) { transcriptionEnabledCheckbox.checked = state.appSettings.transcription.enabled; updateTranscriptionVisibility(); }
   if (transcriptionProviderSelect) transcriptionProviderSelect.value = state.appSettings.transcription.provider;
-  if (whisperModelSelect) whisperModelSelect.value = state.appSettings.transcription.whisper_model || 'Base';
+  if (whisperModelSelect) whisperModelSelect.value = state.appSettings.transcription.whisper_model || DEFAULT_WHISPER_MODEL;
   if (realtimeEnabledCheckbox) realtimeEnabledCheckbox.checked = !!state.appSettings.transcription.realtime_enabled;
   updateProviderVisibility();
   updateTranscriptionProviderWarnings();
@@ -206,7 +223,7 @@ export function collectTranscriptionSettings() {
   if (!state.appSettings.transcription) state.appSettings.transcription = {};
   state.appSettings.transcription.enabled = transcriptionEnabledCheckbox?.checked || false;
   state.appSettings.transcription.provider = transcriptionProviderSelect?.value || 'FluidAudio';
-  state.appSettings.transcription.whisper_model = whisperModelSelect?.value || 'Base';
+  state.appSettings.transcription.whisper_model = whisperModelSelect?.value || DEFAULT_WHISPER_MODEL;
   state.appSettings.transcription.realtime_enabled = realtimeEnabledCheckbox?.checked || false;
 
   if (!state.appSettings.transcription.api_keys) state.appSettings.transcription.api_keys = {};

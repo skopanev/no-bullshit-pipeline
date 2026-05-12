@@ -1,6 +1,6 @@
 [package]
 name = "nbp"
-version = "0.4.5"
+version = "0.4.6"
 description = "A Tauri App"
 authors = ["sk"]
 edition = "2024"
@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.5.6", features = [] }
 
 [dependencies]
-tauri = { version = "2.10", features = ["tray-icon"] }
+tauri = { version = "2.10", features = ["tray-icon", "macos-private-api"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSObject"] }
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAction", "UNNotification", "UNNotificationSettings", "block2"] }
@@ -60,6 +60,7 @@ tauri-plugin-notification = "2.3.3"
 env_logger = "0.11.10"
 tauri-plugin-single-instance = "2.4.0"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-window-state = "2"
 
 [profile.release]
 strip = true

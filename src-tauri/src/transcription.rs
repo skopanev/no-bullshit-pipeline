@@ -88,53 +88,92 @@ struct TranscriptionProgress {
 }
 
 pub fn get_model_url(size: &WhisperModelSize) -> String {
-    let filename = match size {
-        WhisperModelSize::Tiny => "ggml-tiny.bin",
-        WhisperModelSize::Base => "ggml-base.bin",
-        WhisperModelSize::Small => "ggml-small.bin",
-        WhisperModelSize::Medium => "ggml-medium.bin",
-        WhisperModelSize::Large => "ggml-large-v3.bin",
-    };
-    format!("{}/{}", BASE_URL, filename)
+    format!("{}/{}", BASE_URL, size.filename())
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RemoteWhisperModel {
+    pub filename: String,
+    pub url: String,
+    pub size_bytes: u64,
+    pub last_modified: Option<String>,
+    pub downloaded: bool,
+    pub path: String,
+}
+
+/// Return the curated short-list of Whisper models worth offering. The upstream
+/// repo (ggerganov/whisper.cpp on HF) has been frozen since Oct 2024 — there
+/// will be no new files. So we hardcode the 4 picks that cover the real
+/// trade-off space: turbo as the recommended default, its q8 quantization for
+/// users who want half the size, and base/tiny for tight CPU/memory budgets.
+///
+/// The `limit` parameter is accepted but ignored — kept in the signature so the
+/// existing frontend `invoke('list_whisper_models_remote', { limit: ... })`
+/// calls don't need to change.
+#[tauri::command]
+pub async fn list_whisper_models_remote(
+    limit: Option<u32>,
+) -> Result<Vec<RemoteWhisperModel>, String> {
+    let _ = limit;
+    let models_dir = get_models_dir();
+    if !models_dir.exists() {
+        let _ = std::fs::create_dir_all(&models_dir);
+    }
+
+    let curated: &[(&str, u64)] = &[
+        ("ggml-large-v3-turbo.bin", 1_624 * 1024 * 1024),
+        ("ggml-large-v3-turbo-q8_0.bin", 874 * 1024 * 1024),
+        ("ggml-base.bin", 148 * 1024 * 1024),
+        ("ggml-tiny.bin", 78 * 1024 * 1024),
+    ];
+
+    Ok(curated
+        .iter()
+        .map(|(f, size)| {
+            let local = models_dir.join(f);
+            let downloaded = local
+                .metadata()
+                .map(|m| m.len() >= *size)
+                .unwrap_or(false);
+            RemoteWhisperModel {
+                filename: f.to_string(),
+                url: format!("{}/{}", BASE_URL, f),
+                size_bytes: *size,
+                last_modified: None,
+                downloaded,
+                path: local.to_string_lossy().to_string(),
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]
 pub async fn get_whisper_models_info() -> Result<Vec<ModelInfo>, String> {
-    let models = vec![
-        WhisperModelSize::Tiny,
-        WhisperModelSize::Base,
-        WhisperModelSize::Small,
-        WhisperModelSize::Medium,
-        WhisperModelSize::Large,
+    // Legacy command kept for backward compat with existing UI paths.
+    // Returns the canonical 5-size set with current download status.
+    let baseline: Vec<(WhisperModelSize, u64)> = vec![
+        (WhisperModelSize::new("ggml-tiny.bin"), 74),
+        (WhisperModelSize::new("ggml-base.bin"), 141),
+        (WhisperModelSize::new("ggml-small.bin"), 465),
+        (WhisperModelSize::new("ggml-medium.bin"), 1462),
+        (WhisperModelSize::new("ggml-large-v3.bin"), 2951),
     ];
 
     let mut results = Vec::new();
     let models_dir = get_models_dir();
-    
     if !models_dir.exists() {
         std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
     }
 
-    for size in models {
+    for (size, size_mb) in baseline {
         let url = get_model_url(&size);
-        let filename = url.split('/').last().unwrap().to_string();
+        let filename = size.filename().to_string();
         let local_path = models_dir.join(&filename);
-        let path_str = local_path.to_string_lossy().to_string();
-
-        let size_mb = match size {
-            WhisperModelSize::Tiny => 74,
-            WhisperModelSize::Base => 141,
-            WhisperModelSize::Small => 465,
-            WhisperModelSize::Medium => 1462,
-            WhisperModelSize::Large => 2951,
-        };
-
-        // Check file exists AND is at least the expected size (not a partial download)
-        let expected_bytes = (size_mb as u64) * 1024 * 1024;
-        let downloaded = local_path.exists() && std::fs::metadata(&local_path)
-            .map(|m| m.len() >= expected_bytes)
-            .unwrap_or(false);
-
+        let expected_bytes = size_mb * 1024 * 1024;
+        let downloaded = local_path.exists()
+            && std::fs::metadata(&local_path)
+                .map(|m| m.len() >= expected_bytes)
+                .unwrap_or(false);
         results.push(ModelInfo {
             size,
             filename,
@@ -142,10 +181,9 @@ pub async fn get_whisper_models_info() -> Result<Vec<ModelInfo>, String> {
             size_mb: Some(size_mb),
             exact_bytes: None,
             downloaded,
-            path: path_str,
+            path: local_path.to_string_lossy().to_string(),
         });
     }
-
     Ok(results)
 }
 
@@ -405,7 +443,7 @@ async fn transcribe_recording_inner(
             let model_path = get_models_dir().join(filename);
 
             if !model_path.exists() {
-                return Err(format!("Model not downloaded: {:?}", model_size));
+                return Err(format!("Model not downloaded: {}", model_size.filename()));
             }
 
             let wav_path = recording_dir.join("temp_transcription.wav");
@@ -428,9 +466,10 @@ async fn transcribe_recording_inner(
 
             let _ = std::fs::remove_file(&wav_path);
 
-            let model_name = format!("whisper-{}", whisper_model_ref
-                .map(|m| format!("{:?}", m).to_lowercase())
-                .unwrap_or_else(|| "unknown".to_string()));
+            let model_name = whisper_model_ref
+                .map(|m| m.filename().trim_end_matches(".bin").trim_start_matches("ggml-").to_string())
+                .map(|s| format!("whisper-{}", s))
+                .unwrap_or_else(|| "whisper-unknown".to_string());
             let duration_sec = read_metadata(&recording_id)
                 .ok()
                 .and_then(|m| m.audio.mix.as_ref().map(|a| a.duration_sec))

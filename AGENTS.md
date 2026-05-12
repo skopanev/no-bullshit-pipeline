@@ -115,12 +115,23 @@ The concrete result/value delivered when this is done.
 - [ ] Independently verifiable checklist item. NO vague "works correctly". Define "correct".
 ```
 
+**Always pass `-d` (and `-A`) via a heredoc:**
+```
+ntk create "title" -p med -d "$(cat <<'EOF'
+## Summary
+...
+EOF
+)"
+```
+
 **Ticket Rules:**
 - **Initiative:** Expand user one-liners into full tickets using codebase context — but only when the task warrants it (see above).
 - **Clarity:** NEVER create vague tickets. Ask questions FIRST if ACs cannot be written.
 - **Closing:** Before running `ntk close` (or moving to `done`) you MUST append a comment via `ntk update <id> -A "..."` describing WHAT WAS DONE — how it was fixed, key files/decisions. No comment, no close.
 
-Project is auto-set via `.ntkrc`. Override with `-P`.
+Project is auto-set via `.ntkrc`. Outside a repo pass `-P <name>` (list via `ntk projects`).
+
+No `.ntkrc` and user named a project? Match it against `ntk projects` (case-insensitive, fuzzy), then pass `-P <matched-name>`.
 
 **Commands:**
 - `ntk ls [-s status,status] [-a initials,initials] [-t tags] [--since YYYY-MM-DD]` — List (comma-separated for multiple statuses/assignees; `--since` filters by creation date)
@@ -130,6 +141,7 @@ Project is auto-set via `.ntkrc`. Override with `-P`.
 - `ntk next [-a initials] [-P project]` — Pick next
 - `ntk deps <id> | -t <tag>[,tag] [-P proj]` — Show dependency tree for one ticket (with `N/M done`, `[ready]`/`(waiting on N)`) or a forest for all tickets carrying the tag(s); external blockers shown as `↗`
 - `ntk users` — List assignees
+- `ntk projects` — List projects from Notion (refreshes global config)
 - `ntk create <title> [-p high|med|low] [-a initials] [-s open] [-T feature|task|bug|epic|constraint|scaffold|infra|chore|core] [-t tags] [-d text] [-P project] [--deps tid,tid] [--due YYYY-MM-DD]`
 - `ntk update <id> [id...]` — Modify (same flags as create + `-d text` to REPLACE body + `-A text` to append + `--title text`). Multiple ids: same flags applied to each; if any id doesn't resolve, nothing is updated. `--deps` accepts `tid,tid` (replace), `+tid,-tid` (add/remove), or `""` (clear); `--due` accepts a date or `""` to clear.
 
@@ -138,6 +150,8 @@ Project is auto-set via `.ntkrc`. Override with `-P`.
 Trigger: user asks "what's done?" / "let's check it" / similar.
 
 Process **one ticket at a time** — never batch. Start with the first ticket in `ntk ls -s to_test -t agent-done`, finish it (GO or NO-GO), then move on.
+
+Queue >1 ticket on separate branches? Review **ONLY in a worktree**: `git worktree add ../<repo>-review <base>`. Drop it when done.
 
 Agent branches are stale — base could change during run. Reconcile overlaps yourself. Escalate only if blocked.
 

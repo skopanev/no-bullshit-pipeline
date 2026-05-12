@@ -299,7 +299,6 @@
                 <div class="settings-item">
                   <div class="settings-info">
                     <label>Auto-stop on Silence</label>
-                    <p>Stop recording after silence (0 = off)</p>
                   </div>
                   <div class="settings-input-group" style="justify-content: flex-end; align-items: center; gap: 6px;">
                     <select id="settings-auto-stop-silence" class="settings-select" style="width:auto;">
@@ -483,19 +482,30 @@
             </div><!-- end pipelines tab -->
 
             <div class="settings-grid settings-tab-content" data-tab="shortcuts">
-              <!-- Master toggle -->
+              <!-- Master toggle + global permission status -->
               <div class="settings-section">
                 <h3>Quick Dictate</h3>
                 <div class="settings-item">
                   <div class="settings-info">
                     <label>Enable Shortcuts</label>
-                    <p>Master switch for hotkey-driven mic → transcribe → paste. Requires Accessibility permission for auto-paste.</p>
+                    <p>Master switch for hotkey-driven mic → transcribe → paste.</p>
                   </div>
                   <div class="settings-input-group" style="justify-content: flex-end">
                     <label class="toggle-switch">
                       <input type="checkbox" id="settings-dictation-enabled" />
                       <span class="slider round"></span>
                     </label>
+                  </div>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-info">
+                    <label>Accessibility</label>
+                    <p id="settings-ax-status-text">Required for auto-paste (⌘V keystroke into focused app).</p>
+                  </div>
+                  <div class="settings-input-group" style="justify-content: flex-end; gap: 10px;">
+                    <span id="settings-ax-status-badge" class="ax-status"></span>
+                    <button id="settings-ax-grant-btn" type="button" class="mini-action-btn" style="display:none;">Grant Permission</button>
+                    <button id="settings-ax-restart-btn" type="button" class="mini-action-btn" style="display:none;" title="macOS caches the trust state per-process; restart picks up the new permission.">Restart NBP</button>
                   </div>
                 </div>
               </div>
@@ -532,6 +542,14 @@
                     <p class="editor-hint">Click the field and press your combo. Esc to cancel.</p>
                   </div>
                   <div class="editor-field">
+                    <label>Input</label>
+                    <select id="dict-editor-input-source" class="settings-select">
+                      <option value="Audio">Audio — record mic and transcribe</option>
+                      <option value="Clipboard">Clipboard — take current selection</option>
+                    </select>
+                    <p class="editor-hint">Clipboard mode runs the pipeline against whatever you have copied, no recording.</p>
+                  </div>
+                  <div class="editor-field" id="dict-editor-engine-field">
                     <label>Transcriber</label>
                     <select id="dict-editor-engine" class="settings-select">
                       <option value="FluidAudio">FluidAudio (bundled, no model needed)</option>
@@ -542,11 +560,7 @@
                   <div class="editor-field" id="dict-editor-model-field">
                     <label>Whisper Model</label>
                     <select id="dict-editor-model" class="settings-select">
-                      <option value="Tiny">Tiny (74 MB)</option>
-                      <option value="Base">Base (141 MB)</option>
-                      <option value="Small">Small (465 MB)</option>
-                      <option value="Medium">Medium (1.4 GB)</option>
-                      <option value="Large">Large (2.9 GB)</option>
+                      <!-- Rendered via JS from list_whisper_models_remote -->
                     </select>
                   </div>
                   <div class="editor-field">
