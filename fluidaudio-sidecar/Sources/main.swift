@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import FluidAudio
 
 struct SpeakerSegment: Codable {
@@ -155,13 +156,145 @@ func mergeAsrWithDiarization(
     return (normalizedSegments, outputSpeakerCount)
 }
 
+// MARK: - Streaming (NDJSON over stdin/stdout)
+
+/// Emit a JSON line to stdout (followed by '\n'). Used for streaming events.
+func emitJSON<T: Encodable>(_ value: T) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(value) else { return }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+}
+
+struct StreamReady: Encodable { let type = "ready" }
+struct StreamPartial: Encodable { let type = "partial"; let text: String }
+struct StreamFinal: Encodable { let type = "final"; let text: String }
+struct StreamError: Encodable { let type = "error"; let message: String }
+
+/// Convert raw interleaved f32 mono PCM bytes (little-endian) into an
+/// AVAudioPCMBuffer at the given sample rate.
+func pcmBufferFromF32Bytes(_ data: Data, sampleRate: Double) -> AVAudioPCMBuffer? {
+    let frameCount = data.count / MemoryLayout<Float>.size
+    guard frameCount > 0 else { return nil }
+    guard let format = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: sampleRate,
+        channels: 1,
+        interleaved: false
+    ) else { return nil }
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else {
+        return nil
+    }
+    buffer.frameLength = AVAudioFrameCount(frameCount)
+    data.withUnsafeBytes { rawPtr in
+        guard let src = rawPtr.bindMemory(to: Float.self).baseAddress else { return }
+        guard let dst = buffer.floatChannelData?[0] else { return }
+        dst.update(from: src, count: frameCount)
+    }
+    return buffer
+}
+
+/// FluidAudio's standard cache root — `~/Library/Application Support/FluidAudio`.
+/// `DownloadUtils.downloadRepo` appends `repo.folderName` (e.g.
+/// `parakeet-eou-streaming/160ms`) to this on download, so loadModels needs
+/// the same composed path.
+func fluidAudioCacheRoot() -> URL {
+    let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    return appSupport.appendingPathComponent("FluidAudio", isDirectory: true)
+}
+
+func repoForChunkSize(_ chunkSize: StreamingChunkSize) -> Repo {
+    switch chunkSize {
+    case .ms160: return .parakeetEou160
+    case .ms320: return .parakeetEou320
+    case .ms1280: return .parakeetEou1280
+    }
+}
+
+func streamingModelDir(chunkSize: StreamingChunkSize) -> URL {
+    fluidAudioCacheRoot().appendingPathComponent(repoForChunkSize(chunkSize).folderName, isDirectory: true)
+}
+
+/// Download Parakeet EOU CoreML models if not already cached.
+func ensureStreamingModelsCached(chunkSize: StreamingChunkSize) async throws {
+    let destination = streamingModelDir(chunkSize: chunkSize)
+    let encoderPath = destination.appendingPathComponent("streaming_encoder.mlmodelc")
+    let decoderPath = destination.appendingPathComponent("decoder.mlmodelc")
+    if FileManager.default.fileExists(atPath: encoderPath.path)
+        && FileManager.default.fileExists(atPath: decoderPath.path)
+    {
+        return
+    }
+    writeProgress("Downloading streaming model", 5)
+    try await DownloadUtils.downloadRepo(repoForChunkSize(chunkSize), to: fluidAudioCacheRoot())
+}
+
+func runStreamMode() async {
+    do {
+        let chunkSize: StreamingChunkSize = .ms160
+        let manager = StreamingEouAsrManager(chunkSize: chunkSize, eouDebounceMs: 1280)
+
+        writeProgress("Loading models", 0)
+        try await ensureStreamingModelsCached(chunkSize: chunkSize)
+        try await manager.loadModels(from: streamingModelDir(chunkSize: chunkSize))
+        writeProgress("Loading models", 50)
+
+        // EOU callback → partial event. The transcript here is the segment
+        // bounded by the detected end-of-utterance — partials accumulate over
+        // multiple sentences.
+        await manager.setEouCallback { transcript in
+            emitJSON(StreamPartial(text: transcript))
+        }
+
+        emitJSON(StreamReady())
+        writeProgress("Ready", 100)
+
+        // Stream loop: read f32 mono 16 kHz PCM from stdin in fixed chunks.
+        // 4096 bytes = 1024 f32 samples = 64 ms @ 16 kHz — comfortably small
+        // for the 160 ms chunkSize the manager wants. The manager buffers
+        // internally so we can push any size.
+        let stdin = FileHandle.standardInput
+        let readSize = 4096
+        var accumulated = ""
+        while true {
+            let data = try stdin.read(upToCount: readSize) ?? Data()
+            if data.isEmpty {
+                break
+            }
+            guard let buffer = pcmBufferFromF32Bytes(data, sampleRate: 16_000) else {
+                continue
+            }
+            let incremental = try await manager.process(audioBuffer: buffer)
+            if !incremental.isEmpty {
+                accumulated += incremental
+                emitJSON(StreamPartial(text: accumulated))
+            }
+        }
+
+        // EOF: flush whatever's left and emit the consolidated transcript.
+        let tail = try await manager.finish()
+        let finalText = accumulated + tail
+        emitJSON(StreamFinal(text: finalText))
+        exit(0)
+    } catch {
+        emitJSON(StreamError(message: error.localizedDescription))
+        exit(1)
+    }
+}
+
 // MARK: - Main
 
 @main
 struct FluidAudioSidecar {
     static func main() async {
         guard CommandLine.arguments.count >= 2 else {
-            writeError("Usage: fluidaudio-sidecar <path-to-wav>")
+            writeError("Usage: fluidaudio-sidecar <path-to-wav>  |  fluidaudio-sidecar --stream")
+        }
+
+        if CommandLine.arguments[1] == "--stream" {
+            await runStreamMode()
+            return
         }
 
         let wavPath = CommandLine.arguments[1]
@@ -179,7 +312,8 @@ struct FluidAudioSidecar {
             if !cached { writeProgress("Downloading ASR model", 5) }
             let asrModels = try await AsrModels.downloadAndLoad(version: .v3)
             let asrManager = AsrManager(config: .default)
-            try await asrManager.initialize(models: asrModels)
+            // FluidAudio 0.14.5: loadModels replaces the old initialize(models:).
+            try await asrManager.loadModels(asrModels)
             writeProgress("Preparing models", 15)
 
             if !cached { writeProgress("Downloading diarizer", 20) }
@@ -203,7 +337,9 @@ struct FluidAudioSidecar {
                 }
             }
 
-            let asrResult = try await asrManager.transcribe(fileURL, source: .system)
+            // FluidAudio 0.14.5: transcribe takes an inout decoder state.
+            var decoderState = try TdtDecoderState()
+            let asrResult = try await asrManager.transcribe(fileURL, decoderState: &decoderState)
             progressTask.cancel()
             writeProgress("Transcribing", 60)
 
@@ -234,7 +370,7 @@ struct FluidAudioSidecar {
             FileHandle.standardOutput.write(json)
             FileHandle.standardOutput.write(Data("\n".utf8))
 
-            asrManager.cleanup()
+            await asrManager.cleanup()
         } catch {
             writeError(error.localizedDescription)
         }
