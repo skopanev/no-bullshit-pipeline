@@ -111,6 +111,7 @@ async fn transcribe_recording_inner(
         TranscriptionProvider::OpenAI => TranscriptSource::Openai,
         TranscriptionProvider::Google => TranscriptSource::Google,
         TranscriptionProvider::Anthropic => TranscriptSource::Anthropic,
+        TranscriptionProvider::AppleSpeech => TranscriptSource::Apple,
     };
 
     let _ = app_handle.emit("transcription_progress", TranscriptionProgress {
@@ -120,6 +121,86 @@ async fn transcribe_recording_inner(
     });
 
     let transcript_json = match provider {
+        TranscriptionProvider::AppleSpeech => {
+            let wav_path = recording_dir.join("temp_transcription.wav");
+            convert_ogg_to_wav(&audio_path, &wav_path)?;
+
+            let (mut rx, _child) = app_handle.shell().sidecar("apple-speech-sidecar")
+                .map_err(|e| format!("Failed to create sidecar command: {}", e))?
+                .arg(wav_path.to_str().ok_or("Invalid WAV path")?)
+                .spawn()
+                .map_err(|e| format!("Failed to spawn Apple Speech sidecar: {}", e))?;
+
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = String::new();
+            let mut exit_code: Option<i32> = None;
+
+            let timeout_duration = std::time::Duration::from_secs(600);
+            let start = std::time::Instant::now();
+
+            while let Some(event) = rx.recv().await {
+                if start.elapsed() > timeout_duration {
+                    return Err("Apple Speech sidecar timed out after 10 minutes".to_string());
+                }
+                use tauri_plugin_shell::process::CommandEvent;
+                match event {
+                    CommandEvent::Stdout(data) => stdout_buf.extend_from_slice(&data),
+                    CommandEvent::Stderr(data) => {
+                        let line = String::from_utf8_lossy(&data);
+                        stderr_buf.push_str(&line);
+                        for l in line.lines() {
+                            if let Some(rest) = l.strip_prefix("PROGRESS:") {
+                                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                                if parts.len() == 2 {
+                                    if let Ok(pct) = parts[1].parse::<u32>() {
+                                        let _ = app_handle.emit("transcription_progress", TranscriptionProgress {
+                                            recording_id: recording_id.clone(),
+                                            stage: parts[0].to_string(),
+                                            percent: pct,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    CommandEvent::Terminated(payload) => {
+                        exit_code = payload.code;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            let _ = std::fs::remove_file(&wav_path);
+
+            for line in stderr_buf.lines() {
+                if !line.starts_with("PROGRESS:") && !line.is_empty() {
+                    eprintln!("{}", line);
+                }
+            }
+
+            if exit_code != Some(0) {
+                return Err(format!("Apple Speech sidecar failed: {}", stderr_buf));
+            }
+
+            let stdout = String::from_utf8_lossy(&stdout_buf);
+            let out: FluidAudioOutput = serde_json::from_str(&stdout)
+                .map_err(|e| format!("Failed to parse Apple Speech output: {}", e))?;
+
+            let duration_sec = read_metadata(&recording_id)
+                .ok()
+                .and_then(|m| m.audio.mix.as_ref().map(|a| a.duration_sec))
+                .unwrap_or(0.0);
+
+            TranscriptJson {
+                source,
+                model: out.model,
+                created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                duration_sec,
+                language: Some("auto".to_string()),
+                text: Some(out.text),
+            }
+        },
         TranscriptionProvider::FluidAudio => {
             let wav_path = recording_dir.join("temp_transcription.wav");
             convert_ogg_to_wav(&audio_path, &wav_path)?;

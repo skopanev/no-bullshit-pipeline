@@ -14,13 +14,13 @@ bun run build:sidecar:force
 
 echo "==> Signing sidecar binaries..."
 for SIDECAR in \
-  src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin \
-  src-tauri/binaries/apple-speech-sidecar-aarch64-apple-darwin
+  "src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin" \
+  "src-tauri/binaries/apple-speech-sidecar-aarch64-apple-darwin"
 do
   if [ -f "$SIDECAR" ]; then
     codesign --force --options runtime --sign "$SIGN_ID" \
       --entitlements src-tauri/entitlements.plist "$SIDECAR"
-    echo "    Signed $SIDECAR"
+    echo "    Signed: $SIDECAR"
   fi
 done
 

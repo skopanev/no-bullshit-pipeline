@@ -614,6 +614,7 @@ async fn transcribe(
 ) -> Result<String, String> {
     match &shortcut.engine {
         TranscriptionProvider::FluidAudio => run_fluidaudio(app, &mono_16k).await,
+        TranscriptionProvider::AppleSpeech => run_apple_speech(app, &mono_16k).await,
         TranscriptionProvider::OpenAI => {
             let settings = load_settings();
             let api_key = get_api_key_for_provider(&settings, "openai")
@@ -926,6 +927,47 @@ async fn run_fluidaudio(app: &AppHandle, samples_16k: &[f32]) -> Result<String, 
 
     let out: FluidOut = serde_json::from_slice(&stdout_buf)
         .map_err(|e| format!("parse FluidAudio output: {}", e))?;
+    Ok(out.text)
+}
+
+/// Apple SpeechAnalyzer dictation path — mirrors run_fluidaudio but spawns the
+/// apple-speech-sidecar binary. Output JSON shape is identical (text + model)
+/// so the parser is shared.
+async fn run_apple_speech(app: &AppHandle, samples_16k: &[f32]) -> Result<String, String> {
+    use tauri_plugin_shell::ShellExt;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "nbp-dict-{}.wav",
+        uuid::Uuid::new_v4().simple()
+    ));
+    write_mono_wav(&tmp, samples_16k, TARGET_RATE)?;
+
+    let (mut rx, _child) = app
+        .shell()
+        .sidecar("apple-speech-sidecar")
+        .map_err(|e| format!("sidecar create: {}", e))?
+        .arg(tmp.to_str().ok_or("invalid tmp path")?)
+        .spawn()
+        .map_err(|e| format!("sidecar spawn: {}", e))?;
+
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf = String::new();
+    let mut exit_code: Option<i32> = None;
+    while let Some(event) = rx.recv().await {
+        use tauri_plugin_shell::process::CommandEvent;
+        match event {
+            CommandEvent::Stdout(data) => stdout_buf.extend_from_slice(&data),
+            CommandEvent::Stderr(data) => stderr_buf.push_str(&String::from_utf8_lossy(&data)),
+            CommandEvent::Terminated(p) => { exit_code = p.code; break; }
+            _ => {}
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    if exit_code != Some(0) {
+        return Err(format!("Apple Speech sidecar failed: {}", stderr_buf));
+    }
+    let out: FluidOut = serde_json::from_slice(&stdout_buf)
+        .map_err(|e| format!("parse Apple Speech output: {}", e))?;
     Ok(out.text)
 }
 

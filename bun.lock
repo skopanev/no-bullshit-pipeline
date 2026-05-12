@@ -9,10 +9,10 @@
       },
       "devDependencies": {
         "@eslint/js": "^10.0.1",
-        "@tauri-apps/cli": "^2.10.1",
+        "@tauri-apps/cli": "^2.11.1",
         "esbuild": "^0.28.0",
-        "eslint": "^10.1.0",
-        "globals": "^17.4.0",
+        "eslint": "^10.3.0",
+        "globals": "^17.6.0",
       },
     },
   },
