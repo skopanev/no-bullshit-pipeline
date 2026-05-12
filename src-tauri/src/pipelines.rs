@@ -458,6 +458,8 @@ mod tests {
         Pipeline {
             name: "test-pipeline".to_string(),
             description: "A test pipeline".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![
                 PipelineStep {
                     name: "summarize".to_string(),
@@ -520,6 +522,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "bad-pipeline".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![
                 PipelineStep {
                     name: "step-a".to_string(),
@@ -554,6 +558,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "dup-pipeline".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![
                 PipelineStep {
                     name: "step-a".to_string(),
@@ -643,6 +649,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "post-to-notion".to_string(),
                 connector: ConnectorType::Notion,
@@ -661,6 +669,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "post-to-notion".to_string(),
                 connector: ConnectorType::Notion,
@@ -677,6 +687,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "custom".to_string(),
                 connector: ConnectorType::Llm,
@@ -693,6 +705,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "summarize".to_string(),
                 connector: ConnectorType::Llm,
@@ -711,6 +725,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "summarize".to_string(),
                 connector: ConnectorType::Llm,
@@ -732,6 +748,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "save-it".to_string(),
                 connector: ConnectorType::Save,
@@ -750,6 +768,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "notify".to_string(),
                 connector: ConnectorType::Webhook,
@@ -768,6 +788,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "notify".to_string(),
                 connector: ConnectorType::Webhook,
@@ -786,6 +808,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "test".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![PipelineStep {
                 name: "notify".to_string(),
                 connector: ConnectorType::Webhook,
@@ -813,6 +837,8 @@ mod tests {
         let pipeline = Pipeline {
             name: "multi-input".to_string(),
             description: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
             steps: vec![
                 PipelineStep {
                     name: "step-a".to_string(),

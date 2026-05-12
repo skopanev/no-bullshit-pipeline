@@ -89,3 +89,63 @@ Use only `ntk` CLI to manage tickets (tasks). Key commands:
   - `-A <text>` — append text to page body
   - `--deps <tid,tid>` — set dependency ticket IDs
   - `--due <date>` — set due date (`YYYY-MM-DD`)
+
+<!-- NTK -->
+
+### Tickets
+
+**CRITICAL:** ALL task management MUST use `ntk` CLI. NO other tools. NO Notion API. NO exceptions.
+
+Drafting depth depends on the task. For trivial one-liners ("just add XXX", "update README", "bump version") — DO NOT scour the codebase, take the task as-is. For substantive tickets — draft the description independently using codebase context. NEVER ask the user to fill in details that can be inferred from the codebase or the internet. Only ask if the info genuinely cannot be found.
+
+**Description Format (`-d`):**
+```
+## Summary
+Business-level what/why. Max 2 sentences.
+
+## Expected Outcome
+The concrete result/value delivered when this is done.
+
+## Details
+- Implementation specifics, affected files/modules, technical approach
+- Edge cases, constraints, dependencies
+
+## Acceptance Criteria
+- [ ] Independently verifiable checklist item
+- [ ] Independently verifiable checklist item. NO vague "works correctly". Define "correct".
+```
+
+**Ticket Rules:**
+- **Initiative:** Expand user one-liners into full tickets using codebase context — but only when the task warrants it (see above).
+- **Clarity:** NEVER create vague tickets. Ask questions FIRST if ACs cannot be written.
+- **Closing:** Before running `ntk close` (or moving to `done`) you MUST append a comment via `ntk update <id> -A "..."` describing WHAT WAS DONE — how it was fixed, key files/decisions. No comment, no close.
+
+Project is auto-set via `.ntkrc`. Override with `-P`.
+
+**Commands:**
+- `ntk ls [-s status,status] [-a initials,initials] [-t tags] [--since YYYY-MM-DD]` — List (comma-separated for multiple statuses/assignees; `--since` filters by creation date)
+- `ntk show <id> [id...]` — View (pass multiple ids space- or comma-separated)
+- `ntk start <id>` — Mark `in_progress`
+- `ntk close <id>` — Mark `done`
+- `ntk next [-a initials] [-P project]` — Pick next
+- `ntk deps <id> | -t <tag>[,tag] [-P proj]` — Show dependency tree for one ticket (with `N/M done`, `[ready]`/`(waiting on N)`) or a forest for all tickets carrying the tag(s); external blockers shown as `↗`
+- `ntk users` — List assignees
+- `ntk create <title> [-p high|med|low] [-a initials] [-s open] [-T feature|task|bug|epic|constraint|scaffold|infra|chore|core] [-t tags] [-d text] [-P project] [--deps tid,tid] [--due YYYY-MM-DD]`
+- `ntk update <id> [id...]` — Modify (same flags as create + `-d text` to REPLACE body + `-A text` to append + `--title text`). Multiple ids: same flags applied to each; if any id doesn't resolve, nothing is updated. `--deps` accepts `tid,tid` (replace), `+tid,-tid` (add/remove), or `""` (clear); `--due` accepts a date or `""` to clear.
+
+### Reviewing Agent Work
+
+Trigger: user asks "what's done?" / "let's check it" / similar.
+
+Process **one ticket at a time** — never batch. Start with the first ticket in `ntk ls -s to_test -t agent-done`, finish it (GO or NO-GO), then move on.
+
+Agent branches are stale — base could change during run. Reconcile overlaps yourself. Escalate only if blocked.
+
+1. `ntk show <id>` — read request + agent log.
+2. `git fetch origin && git diff --stat origin/<base>..origin/ntk/<id>` (base = project's main branch).
+3. Summarize: what changed, flag anything off-topic or junk (files unrelated to the ticket).
+4. Give your own short, concise verdict — one sentence — then ask the user: **GO / NO-GO?**
+   - **GO:** sync base (`git switch <base> && git pull --rebase`), `git checkout origin/ntk/<id> -- <task files only>` (skip junk). If file already modified — edit by hand, no `checkout`. Commit + push, `ntk update <id> -s done -A "merged: ..."`, `git push origin --delete ntk/<id>` (only after merge push confirmed).
+   - **NO-GO:** show the issues, discuss. Nothing else.
+
+<!-- /NTK -->

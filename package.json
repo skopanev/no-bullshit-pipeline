@@ -1,10 +1,10 @@
 {
   "name": "nbp",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "scripts": {
-    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
     "build:js": "bun esbuild.mjs",
     "build:js:dev": "bun esbuild.mjs --dev",
     "check:js": "bun esbuild.mjs",
@@ -25,10 +25,10 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/cli": "^2.11.1",
     "esbuild": "^0.28.0",
-    "eslint": "^10.1.0",
-    "globals": "^17.4.0"
+    "eslint": "^10.3.0",
+    "globals": "^17.6.0"
   },
   "dependencies": {
     "ui-ux-pro-mcp": "^1.5.0"

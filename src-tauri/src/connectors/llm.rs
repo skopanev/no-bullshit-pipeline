@@ -144,6 +144,95 @@ impl StepFrontmatter {
 /// - `augmented_prompt`: optional pre-built prompt (used when LLM feeds into Notion step).
 ///   When `Some`, skips internal template loading and uses the provided prompt directly.
 ///   When `None`, behavior is identical to the pre-Phase-3 code path.
+/// Execute an LLM step against raw text input, returning the model's output text.
+/// No file I/O, no frontmatter, no augmentation. Used by Quick Dictate to chain
+/// LLM-only pipeline steps in memory.
+pub async fn execute_inline(
+    config: &serde_json::Value,
+    input_text: &str,
+) -> Result<String, String> {
+    let llm_config = LlmConfig::from_value(config)?;
+
+    let prompt_text = if let Some(ref template_name) = llm_config.prompt_template {
+        let template = get_prompt_template_internal(template_name)?;
+        template.prompt.clone()
+    } else if let Some(ref inline) = llm_config.prompt_inline {
+        inline.clone()
+    } else {
+        return Err("LLM step missing prompt_template or prompt_inline".to_string());
+    };
+
+    let full_prompt = substitute_variables(&prompt_text, input_text);
+
+    let approx_tokens = estimate_tokens(&full_prompt);
+    let context_limit = context_limit_for_provider(&llm_config.provider);
+    let prompt_to_send = if approx_tokens > context_limit {
+        let max_chars = context_limit * 4;
+        if full_prompt.len() > max_chars {
+            let safe = full_prompt.floor_char_boundary(max_chars);
+            full_prompt[..safe].to_string()
+        } else {
+            full_prompt
+        }
+    } else {
+        full_prompt
+    };
+
+    let settings = load_settings();
+    match llm_config.provider.as_str() {
+        "openai" => {
+            let api_key = crate::config::get_api_key_for_provider(&settings, "openai")
+                .ok_or("OpenAI API key not configured. Set it in Settings.")?;
+            cloud_ai::process_with_gpt4o(&api_key, &prompt_to_send, "", &llm_config.model).await
+        }
+        "google" => {
+            let api_key = crate::config::get_api_key_for_provider(&settings, "google")
+                .ok_or("Google API key not configured. Set it in Settings.")?;
+            cloud_ai::process_with_gemini(&api_key, &prompt_to_send, "", &llm_config.model).await
+        }
+        "anthropic" => {
+            let api_key = crate::config::get_api_key_for_provider(&settings, "anthropic")
+                .ok_or("Anthropic API key not configured. Set it in Settings.")?;
+            cloud_ai::process_with_claude(&api_key, &prompt_to_send, "", &llm_config.model).await
+        }
+        "local" => {
+            let prompt_clone = prompt_to_send.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::local_llm::process_with_local(&prompt_clone, "")
+            })
+            .await
+            .map_err(|e| format!("Local LLM task failed: {}", e))?
+        }
+        "ollama" => {
+            cloud_ai::process_with_openai_compat(
+                "http://localhost:11434",
+                None,
+                &llm_config.model,
+                &prompt_to_send,
+                "",
+            )
+            .await
+        }
+        "cli_agent" => {
+            let cli_config = settings.cli_agent.clone();
+            let model_override = if llm_config.model.is_empty() || llm_config.model == "default" {
+                cli_config.model.as_deref().map(|s| s.to_string())
+            } else {
+                Some(llm_config.model.clone())
+            };
+            super::cli_agent::process_with_cli(
+                &cli_config.cli,
+                &prompt_to_send,
+                "",
+                model_override.as_deref(),
+                cli_config.timeout_secs,
+            )
+            .await
+        }
+        other => Err(format!("Unknown LLM provider: '{}'", other)),
+    }
+}
+
 pub async fn execute(
     input_path: &Path,
     config: &serde_json::Value,

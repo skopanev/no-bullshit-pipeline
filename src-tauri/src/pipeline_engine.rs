@@ -86,14 +86,6 @@ fn extract_title_from_output(content: &str) -> Option<String> {
     None
 }
 
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-    }
-}
-
 /// Get the pipeline output directory for a recording
 fn get_pipeline_output_dir(recording_id: &str, pipeline_name: &str, run_index: usize) -> PathBuf {
     let dir_name = if run_index == 0 {

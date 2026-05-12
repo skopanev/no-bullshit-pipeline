@@ -17,6 +17,7 @@
         }
       ]
     },
-    "notification:default"
+    "notification:default",
+    "global-shortcut:default"
   ]
 }

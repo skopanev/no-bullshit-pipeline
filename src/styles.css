@@ -4334,3 +4334,178 @@ body.light .provider-models-section {
   color: var(--text-secondary);
   opacity: 0.7;
 }
+
+/* ===== Quick Dictate · Shortcuts editor ===== */
+.hotkey-input-wrap {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.hotkey-input {
+  flex: 1;
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  caret-color: transparent;
+  text-transform: lowercase;
+}
+.hotkey-input::placeholder {
+  font-family: var(--font-family, system-ui);
+  font-style: italic;
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 0.55;
+}
+.hotkey-input.recording,
+.hotkey-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-input));
+}
+.hotkey-clear {
+  padding: 0 14px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+.hotkey-clear:hover {
+  opacity: 1;
+}
+.editor-hint {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  opacity: 0.65;
+  margin: 4px 0 0;
+  line-height: 1.4;
+}
+.editor-field-inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.editor-inline-label {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Compact shortcut list row */
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.shortcut-row:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-card));
+}
+.shortcut-row-kbd {
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  padding: 3px 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  letter-spacing: 0.4px;
+}
+.shortcut-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.shortcut-row-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shortcut-row-meta {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shortcut-row-meta .meta-divider {
+  margin: 0 6px;
+  opacity: 0.5;
+}
+.shortcut-row-meta .meta-pipe {
+  color: var(--accent);
+  opacity: 0.9;
+}
+.shortcut-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  opacity: 0.55;
+  font-size: 0.85rem;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.shortcut-row.has-error {
+  border-color: var(--danger, #f87171);
+  background: color-mix(in srgb, var(--danger, #f87171) 6%, var(--bg-card));
+}
+
+.shortcut-badge {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.shortcut-badge.ok {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.shortcut-badge.bad {
+  background: color-mix(in srgb, var(--danger, #f87171) 20%, transparent);
+  color: var(--danger, #f87171);
+}
+.shortcut-badge.muted {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+/* When master toggle is off — list and add button are dimmed and inert */
+.dictation-disabled .shortcut-row {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.dictation-disabled .shortcut-row:hover {
+  border-color: var(--border);
+  background: var(--bg-card);
+}
+.dictation-disabled #add-dictation-shortcut-btn {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.dictation-disabled .shortcut-empty {
+  opacity: 0.4;
+}

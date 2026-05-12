@@ -217,6 +217,53 @@ pub struct AppSettings {
     /// Provider-first model config: keyed by provider ID ("openai", "google", "anthropic", "local")
     #[serde(default = "default_providers")]
     pub providers: HashMap<String, ProviderConfig>,
+    /// Quick Dictate (hotkey push-to-talk dictation) settings
+    #[serde(default)]
+    pub dictation: DictationConfig,
+}
+
+/// Quick Dictate: hotkey-driven ephemeral mic capture → transcribe → optional pipeline → paste.
+/// Bypasses the regular recording pipeline entirely (no storage, no recordings list).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct DictationConfig {
+    /// Master toggle — when false, no global shortcuts are registered
+    #[serde(default)]
+    pub enabled: bool,
+    /// User-defined shortcuts; each is an independent hotkey/engine/pipeline triple
+    #[serde(default)]
+    pub shortcuts: Vec<DictationShortcut>,
+}
+
+/// One Quick Dictate shortcut configuration.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DictationShortcut {
+    /// Stable id for the entry (UI-managed)
+    pub id: String,
+    /// Display name shown in Settings
+    #[serde(default)]
+    pub name: String,
+    /// Global hotkey string in tauri-plugin-global-shortcut format, e.g. "cmd+shift+d"
+    pub hotkey: String,
+    /// Transcription engine for this shortcut
+    #[serde(default = "default_dictation_engine")]
+    pub engine: TranscriptionProvider,
+    /// Whisper model when engine = LocalWhisper
+    #[serde(default)]
+    pub whisper_model: Option<WhisperModelSize>,
+    /// Mic device name override (None = system default)
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// Optional pipeline name — when set, the transcript is passed through LLM-only steps
+    /// of this pipeline; non-LLM steps (Save/Webhook/Slack/Notion) are skipped silently
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    /// Auto-paste into the focused app via Cmd+V (true) or only copy to clipboard (false)
+    #[serde(default = "default_true")]
+    pub auto_paste: bool,
+}
+
+fn default_dictation_engine() -> TranscriptionProvider {
+    TranscriptionProvider::LocalWhisper
 }
 
 fn default_true() -> bool {
@@ -278,6 +325,7 @@ impl Default for AppSettings {
             last_model_freshness_check: None,
             cached_freshness_results: HashMap::new(),
             providers: default_providers(),
+            dictation: DictationConfig::default(),
         }
     }
 }

@@ -225,6 +225,7 @@
             <button class="settings-tab" data-tab="integrations">Integrations</button>
             <button class="settings-tab" data-tab="prompts">Prompts</button>
             <button class="settings-tab" data-tab="pipelines">Pipelines</button>
+            <button class="settings-tab" data-tab="shortcuts">Shortcuts</button>
             <button class="settings-tab" data-tab="theme">Theme</button>
           </div>
         </div>
@@ -354,6 +355,7 @@
                     <div class="settings-item">
                       <div class="settings-info">
                         <label>Model Size</label>
+                        <p>Location: <span class="mono-font">~/.nbp/models/</span></p>
                       </div>
                       <div class="settings-input-group" style="gap: 8px; flex: 1; justify-content: flex-end">
                         <select id="settings-whisper-model" class="settings-select" style="flex: 1; max-width: 280px">
@@ -372,12 +374,6 @@
                           </svg>
                         </button>
                       </div>
-                    </div>
-                    <div class="settings-item" style="min-height: auto; margin-top: -4px">
-                      <div style="flex: 1"></div>
-                      <p style="font-size: 0.75rem; color: var(--text-secondary); opacity: 0.7; margin: 0; text-align: right;">
-                        Location: <span class="mono-font">~/.nbp/models/</span>
-                      </p>
                     </div>
                   </div>
 
@@ -485,6 +481,95 @@
               </div>
 
             </div><!-- end pipelines tab -->
+
+            <div class="settings-grid settings-tab-content" data-tab="shortcuts">
+              <!-- Master toggle -->
+              <div class="settings-section">
+                <h3>Quick Dictate</h3>
+                <div class="settings-item">
+                  <div class="settings-info">
+                    <label>Enable Shortcuts</label>
+                    <p>Master switch for hotkey-driven mic → transcribe → paste. Requires Accessibility permission for auto-paste.</p>
+                  </div>
+                  <div class="settings-input-group" style="justify-content: flex-end">
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="settings-dictation-enabled" />
+                      <span class="slider round"></span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Shortcuts list -->
+              <div class="settings-section" id="dictation-shortcuts-area">
+                <div class="settings-item" style="flex-direction: column; align-items: stretch;">
+                  <div id="dictation-shortcuts-list" class="pipeline-defs-list">
+                    <!-- Rendered via JS -->
+                  </div>
+                  <button id="add-dictation-shortcut-btn" class="mini-action-btn compact-add-btn">
+                    + New Shortcut
+                  </button>
+                </div>
+              </div>
+
+              <!-- Shortcut editor -->
+              <div id="dictation-shortcut-editor" class="inline-editor" style="display: none;">
+                <div class="inline-editor-header">
+                  <h4 id="dictation-editor-title">New Shortcut</h4>
+                  <button id="close-dictation-editor" class="mini-action-btn" title="Close">&times;</button>
+                </div>
+                <div class="inline-editor-body">
+                  <div class="editor-field">
+                    <label>Name</label>
+                    <input id="dict-editor-name" type="text" class="settings-input-text" placeholder="e.g. quick-note" />
+                  </div>
+                  <div class="editor-field">
+                    <label>Hotkey</label>
+                    <div class="hotkey-input-wrap">
+                      <input id="dict-editor-hotkey" type="text" class="settings-input-text hotkey-input" readonly placeholder="Click and press keys…" />
+                      <button id="dict-editor-hotkey-clear" type="button" class="mini-action-btn hotkey-clear">Clear</button>
+                    </div>
+                    <p class="editor-hint">Click the field and press your combo. Esc to cancel.</p>
+                  </div>
+                  <div class="editor-field">
+                    <label>Transcriber</label>
+                    <select id="dict-editor-engine" class="settings-select">
+                      <option value="FluidAudio">FluidAudio (bundled, no model needed)</option>
+                      <option value="LocalWhisper">Local Whisper (Metal)</option>
+                      <option value="OpenAI">OpenAI Whisper API</option>
+                    </select>
+                  </div>
+                  <div class="editor-field" id="dict-editor-model-field">
+                    <label>Whisper Model</label>
+                    <select id="dict-editor-model" class="settings-select">
+                      <option value="Tiny">Tiny (74 MB)</option>
+                      <option value="Base">Base (141 MB)</option>
+                      <option value="Small">Small (465 MB)</option>
+                      <option value="Medium">Medium (1.4 GB)</option>
+                      <option value="Large">Large (2.9 GB)</option>
+                    </select>
+                  </div>
+                  <div class="editor-field">
+                    <label>Pipeline</label>
+                    <select id="dict-editor-pipeline" class="settings-select">
+                      <option value="">— None (paste raw transcript) —</option>
+                    </select>
+                    <p class="editor-hint">If set, transcript is processed through LLM-only steps of this pipeline before pasting.</p>
+                  </div>
+                  <div class="editor-field editor-field-inline">
+                    <span class="editor-inline-label">Auto-paste into focused app</span>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="dict-editor-auto-paste" checked />
+                      <span class="slider round"></span>
+                    </label>
+                  </div>
+                  <div class="editor-actions">
+                    <button id="save-dictation-shortcut-btn" class="modal-btn primary">Save Shortcut</button>
+                    <button id="delete-dictation-shortcut-btn" class="modal-btn danger" style="display: none;">Delete</button>
+                  </div>
+                </div>
+              </div>
+            </div><!-- end shortcuts tab -->
 
             <div class="settings-grid settings-tab-content" data-tab="models">
               <!-- Provider sections rendered by JS -->

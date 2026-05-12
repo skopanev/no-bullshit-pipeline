@@ -5,6 +5,7 @@ import { applyTheme } from '../ui/theme.js';
 import { ViewManager } from '../ui/view-manager.js';
 import { emit } from '../core/events.js';
 import { applyTranscriptionSettings, collectTranscriptionSettings } from './transcription.js';
+import { applyDictationSettings, initShortcutsTab } from './shortcuts.js';
 
 const storagePathInput = document.getElementById('settings-storage-path');
 const saveMixOnlyCheckbox = document.getElementById('settings-save-mix-only');
@@ -29,6 +30,8 @@ export async function loadSettings() {
     if (saveMixOnlyCheckbox) saveMixOnlyCheckbox.checked = state.appSettings.save_mix_only !== false;
     if (callDetectionCheckbox) callDetectionCheckbox.checked = !!state.appSettings.call_detection_enabled;
     if (autoStopSilenceSelect) autoStopSilenceSelect.value = String(state.appSettings.auto_stop_silence_seconds || 0);
+
+    applyDictationSettings();
 
     applyTheme(state.appSettings.theme);
   } catch (err) {
@@ -59,6 +62,7 @@ export function switchSettingsTab(tabName) {
 
   if (tabName === 'pipelines') emit('tab:pipelines');
   if (tabName === 'prompts') emit('tab:prompts');
+  if (tabName === 'shortcuts') emit('tab:shortcuts');
 
   const scroller = document.querySelector('#settings-view .detail-scroller');
   if (scroller) scroller.scrollTop = 0;
@@ -96,4 +100,6 @@ export function initSettingsListeners() {
   themeButtons.forEach(btn => {
     btn.addEventListener('click', () => { applyTheme(btn.dataset.theme); saveSettings(); });
   });
+
+  initShortcutsTab();
 }

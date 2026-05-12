@@ -54,6 +54,7 @@ mod integrations;
 pub mod local_llm;
 pub mod realtime_transcription;
 mod call_detector;
+mod dictation;
 use audio::AudioState;
 use transcription::TranscriptionState;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -109,6 +110,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(AudioState::new())
         .manage(TranscriptionState::new())
+        .manage(dictation::DictationState::new())
         .manage(permissions::PermissionsStateCache(std::sync::Arc::new(std::sync::Mutex::new(
             permissions::PermissionsState::default()
         ))))
@@ -202,6 +204,35 @@ pub fn run() {
 
             // Build system tray menu
             build_tray(app)?;
+
+            // Quick Dictate: init plugin (always, even if disabled — so reload works
+            // at runtime without restart). Shortcuts are then registered if enabled.
+            #[cfg(desktop)]
+            {
+                let init = app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new().build(),
+                );
+                if let Err(e) = init {
+                    log::warn!("global-shortcut plugin init failed: {}", e);
+                } else if settings.dictation.enabled {
+                    match reload_dictation_shortcuts(app.handle()) {
+                        Ok(results) => {
+                            for r in &results {
+                                if r.status != "registered" {
+                                    log::warn!(
+                                        "dictation startup: {} ({}) → {} {}",
+                                        r.id,
+                                        r.hotkey,
+                                        r.status,
+                                        r.error.clone().unwrap_or_default()
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => log::warn!("dictation: initial registration failed: {}", e),
+                    }
+                }
+            }
 
             Ok(())
         })
@@ -312,6 +343,12 @@ pub fn run() {
             audio::stop_realtime_transcription,
             // Call detection
             call_detector::test_call_notification,
+            // Quick Dictate
+            dictation::dictation_start,
+            dictation::dictation_stop,
+            dictation::dictation_toggle,
+            dictation::dictation_is_active,
+            dictation::dictation_reload_shortcuts,
         ])
         .on_window_event(|window, event| {
             match event {
@@ -331,6 +368,103 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Per-shortcut registration result returned to the frontend so it can show
+/// inline status badges (✓ / ⚠ conflict with another app / disabled).
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct ShortcutRegistration {
+    pub id: String,
+    pub hotkey: String,
+    /// "registered" — bound OK; "disabled" — master toggle off; "error" — OS rejected
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Unregister all current dictation hotkeys and re-register from the live settings.
+/// Returns a per-shortcut status array so the UI can render conflicts.
+#[cfg(desktop)]
+pub fn reload_dictation_shortcuts(
+    app: &tauri::AppHandle,
+) -> Result<Vec<ShortcutRegistration>, String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+
+    let settings = config::load_settings();
+    let mut results: Vec<ShortcutRegistration> = Vec::with_capacity(settings.dictation.shortcuts.len());
+
+    if !settings.dictation.enabled {
+        log::info!("dictation: disabled — no shortcuts registered");
+        for sc in &settings.dictation.shortcuts {
+            results.push(ShortcutRegistration {
+                id: sc.id.clone(),
+                hotkey: sc.hotkey.clone(),
+                status: "disabled".into(),
+                error: None,
+            });
+        }
+        return Ok(results);
+    }
+
+    for sc in &settings.dictation.shortcuts {
+        if sc.hotkey.trim().is_empty() {
+            results.push(ShortcutRegistration {
+                id: sc.id.clone(),
+                hotkey: sc.hotkey.clone(),
+                status: "error".into(),
+                error: Some("Empty hotkey".into()),
+            });
+            continue;
+        }
+        let sid = sc.id.clone();
+        let name = sc.name.clone();
+        let hotkey = sc.hotkey.clone();
+        let result = gs.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                let app = app.clone();
+                let sid = sid.clone();
+                tauri::async_runtime::spawn(async move {
+                    let active = app
+                        .state::<dictation::DictationState>()
+                        .is_active
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let result = if active {
+                        dictation::stop_inner(&app).await.map(|_| ())
+                    } else {
+                        dictation::start_inner(&app, &sid)
+                    };
+                    if let Err(e) = result {
+                        log::warn!("dictation toggle for '{}' failed: {}", sid, e);
+                    }
+                });
+            }
+        });
+        match result {
+            Ok(()) => {
+                log::info!("dictation: registered '{}' ({} → {})", name, hotkey, sc.id);
+                results.push(ShortcutRegistration {
+                    id: sc.id.clone(),
+                    hotkey: hotkey.clone(),
+                    status: "registered".into(),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                log::warn!("dictation: failed to register '{}' ({}): {}", name, hotkey, msg);
+                results.push(ShortcutRegistration {
+                    id: sc.id.clone(),
+                    hotkey: hotkey.clone(),
+                    status: "error".into(),
+                    error: Some(msg),
+                });
+            }
+        }
+    }
+    Ok(results)
 }
 
 /// Show the main window and restore dock presence
