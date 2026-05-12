@@ -1,7 +1,7 @@
 {
   "name": "nbp",
   "private": true,
-  "version": "0.4.12",
+  "version": "0.4.13",
   "type": "module",
   "scripts": {
     "check": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
