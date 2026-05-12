@@ -13,6 +13,7 @@ pub enum TranscriptionProvider {
     OpenAI,
     Google,
     Anthropic,
+    AppleSpeech,
     #[serde(other)]
     Unknown,
 }

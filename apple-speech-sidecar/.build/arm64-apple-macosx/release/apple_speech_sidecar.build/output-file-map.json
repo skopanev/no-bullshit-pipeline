@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/apple_speech_sidecar.d",
+    "object": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/apple_speech_sidecar.o",
+    "swift-dependencies": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/primary.swiftdeps"
+  },
+  "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/Sources/main.swift": {
+    "object": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/main.swift.o",
+    "swiftmodule": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/main~partial.swiftmodule",
+    "swift-dependencies": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/main.swiftdeps",
+    "diagnostics": "/private/tmp/nbp-apple-pickup/apple-speech-sidecar/.build/arm64-apple-macosx/release/apple_speech_sidecar.build/main.dia"
+  }
+}

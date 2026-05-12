@@ -9,13 +9,17 @@ APPLE_TEAM_ID="Z499WGKJW6"
 NAME=$(grep '"productName":' src-tauri/tauri.conf.json | cut -d'"' -f4)
 VERSION=$(grep '"version":' src-tauri/tauri.conf.json | cut -d'"' -f4)
 
-echo "==> Signing sidecar binary..."
-SIDECAR="src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin"
-if [ -f "$SIDECAR" ]; then
-  codesign --force --options runtime --sign "$SIGN_ID" \
-    --entitlements src-tauri/entitlements.plist "$SIDECAR"
-  echo "    Sidecar signed."
-fi
+echo "==> Signing sidecar binaries..."
+for SIDECAR in \
+  "src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin" \
+  "src-tauri/binaries/apple-speech-sidecar-aarch64-apple-darwin"
+do
+  if [ -f "$SIDECAR" ]; then
+    codesign --force --options runtime --sign "$SIGN_ID" \
+      --entitlements src-tauri/entitlements.plist "$SIDECAR"
+    echo "    Signed: $SIDECAR"
+  fi
+done
 
 echo "==> Bundling JS..."
 bun esbuild.mjs
