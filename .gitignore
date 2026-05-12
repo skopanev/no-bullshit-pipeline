@@ -65,3 +65,6 @@ _hltm
 .hltm/human.md
 pilot
 .hltm-pilot
+
+# Swift sidecar build artifacts
+apple-speech-sidecar/.build/
