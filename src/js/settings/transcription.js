@@ -75,9 +75,22 @@ export async function updateProviderVisibility() {
   if (isCloud) updateTranscriptionKeyStatusDot();
 }
 
+/// Hide Apple Speech option from any select that contains
+/// `[data-needs-apple-speech="1"]` when running on macOS < 26 (or non-mac).
+async function hideAppleSpeechIfUnavailable() {
+  let supported = false;
+  try { supported = await invoke('has_apple_speech'); } catch (_e) { /* treat as unsupported */ }
+  if (supported) return;
+  document.querySelectorAll('option[data-needs-apple-speech="1"]').forEach((opt) => {
+    opt.remove();
+  });
+}
+
 export function initTranscriptionSettings() {
   if (transcriptionEnabledCheckbox) transcriptionEnabledCheckbox.addEventListener('change', updateTranscriptionVisibility);
   if (transcriptionProviderSelect) transcriptionProviderSelect.addEventListener('change', updateProviderVisibility);
+
+  hideAppleSpeechIfUnavailable();
 
   const setApiKeyBtn = document.getElementById('set-api-key-btn');
   if (setApiKeyBtn) {

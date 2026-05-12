@@ -12,6 +12,7 @@ pub enum TranscriptSource {
     Openai,       // OpenAI Whisper-1 API
     Google,       // Google Gemini
     Anthropic,    // Anthropic Claude
+    Apple,        // Apple SpeechAnalyzer (macOS 26+)
     #[serde(other)]
     Unknown,
 }

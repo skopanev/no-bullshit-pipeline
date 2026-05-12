@@ -67,6 +67,33 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// True on macOS 26.0+ (Tahoe) — the OS version that ships the SpeechAnalyzer
+/// framework powering the Apple Speech provider. Used by the frontend to hide
+/// the dropdown option on older systems.
+#[tauri::command]
+fn has_apple_speech() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output();
+        if let Ok(o) = out {
+            if let Ok(s) = String::from_utf8(o.stdout) {
+                if let Some(major) = s.trim().split('.').next() {
+                    if let Ok(n) = major.parse::<u32>() {
+                        return n >= 26;
+                    }
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 #[tauri::command]
 fn get_audio_level() -> f32 {
     // Return max of mic and system audio levels
@@ -258,6 +285,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_version,
+            has_apple_speech,
             audio::start_recording,
             audio::stop_recording,
             audio::pause_recording,

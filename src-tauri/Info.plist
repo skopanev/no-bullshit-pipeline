@@ -8,5 +8,8 @@
         <key>NSAudioCaptureUsageDescription</key>
         <string>NBP requires system audio access to record audio from your computer, including calls
             in Zoom, FaceTime, Slack, and other applications.</string>
+        <key>NSSpeechRecognitionUsageDescription</key>
+        <string>NBP uses Apple's on-device SpeechAnalyzer to transcribe your recordings locally
+            when the Apple Speech provider is selected.</string>
     </dict>
 </plist>
