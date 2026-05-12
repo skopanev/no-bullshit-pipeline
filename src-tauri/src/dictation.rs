@@ -184,6 +184,9 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         .map_err(|e| format!("state lock: {}", e))? = Some(session);
     state.is_active.store(true, Ordering::Relaxed);
 
+    // Land the HUD on the monitor the user is actually looking at.
+    crate::reposition_dictation_hud(app);
+
     emit_status(app, "recording", Some(&shortcut.id), None);
     log::info!(
         "dictation: '{}' recording started (rate={}, channels={})",
@@ -265,6 +268,7 @@ pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<S
     let shortcut = find_shortcut(shortcut_id)
         .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
 
+    crate::reposition_dictation_hud(app);
     emit_status(app, "reading_clipboard", Some(&shortcut.id), None);
     let text = read_clipboard().map_err(|e| {
         emit_status(app, "error", Some(&shortcut.id), Some(format!("Clipboard read failed: {}", e)));

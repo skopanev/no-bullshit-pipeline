@@ -214,9 +214,9 @@ pub fn run() {
             // Build system tray menu
             build_tray(app)?;
 
-            // Quick Dictate floating HUD — small always-on-top window, hidden
-            // until a shortcut fires. Pre-create so the page is loaded and
-            // listening for dictation_status events at startup.
+            // Quick Dictate floating HUD: small always-on-top overlay window
+            // shown during dictation. Repositioned to the cursor's monitor
+            // on each session start (see dictation::start_inner).
             build_dictation_hud(app.handle())?;
 
             // Quick Dictate: init plugin (always, even if disabled — so reload works
@@ -539,6 +539,59 @@ fn restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Reposition the HUD over the monitor that currently hosts the mouse cursor.
+/// macOS users with multiple displays expect dictation overlays to appear on
+/// the screen they're working on, not on the primary monitor by default.
+/// Called by dictation.rs just before emitting the first `recording` /
+/// `reading_clipboard` event each session.
+pub fn reposition_dictation_hud(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("dictation-hud") else {
+        return;
+    };
+    let Ok(monitors) = window.available_monitors() else {
+        return;
+    };
+    if monitors.is_empty() {
+        return;
+    }
+    // Cursor returns a PhysicalPosition in global (multi-monitor) coords.
+    let cursor = window.cursor_position().ok();
+
+    let active = cursor.and_then(|c| {
+        monitors.iter().find(|m| {
+            let pos = m.position();
+            let size = m.size();
+            let x0 = pos.x as f64;
+            let y0 = pos.y as f64;
+            let x1 = x0 + size.width as f64;
+            let y1 = y0 + size.height as f64;
+            c.x >= x0 && c.x < x1 && c.y >= y0 && c.y < y1
+        })
+    });
+
+    let monitor = match active {
+        Some(m) => m,
+        None => match monitors.first() {
+            Some(m) => m,
+            None => return,
+        },
+    };
+
+    let scale = monitor.scale_factor();
+    let m_pos = monitor.position();
+    let m_size = monitor.size();
+    let hud_w = 340.0_f64;
+    // Convert physical monitor origin + size into logical coords so
+    // set_position(LogicalPosition) lands consistently across HiDPI displays.
+    let mx = m_pos.x as f64 / scale;
+    let my = m_pos.y as f64 / scale;
+    let mw = m_size.width as f64 / scale;
+    let mh = m_size.height as f64 / scale;
+    let x = mx + (mw - hud_w) / 2.0;
+    let y = my + mh * 0.12;
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+}
+
 fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     if app.get_webview_window("dictation-hud").is_some() {
@@ -581,17 +634,14 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
         }
     }
 
-    // Center the HUD near the top of the primary monitor (system-dictation feel)
     if let Some(window) = app.get_webview_window("dictation-hud") {
-        if let Ok(Some(monitor)) = window.primary_monitor() {
-            let size = monitor.size();
-            let scale = monitor.scale_factor();
-            let hud_w = 340.0_f64;
-            let x = (size.width as f64 / scale - hud_w) / 2.0;
-            let y = size.height as f64 / scale * 0.12; // ~12% from top
-            let _ = window.set_position(tauri::LogicalPosition::new(x, y));
-            log::info!("dictation-hud: positioned at ({:.0}, {:.0})", x, y);
+        // Float across all macOS Spaces so the HUD stays visible when the
+        // user switches desktops / Mission Control during a dictation session.
+        if let Err(e) = window.set_visible_on_all_workspaces(true) {
+            log::warn!("dictation-hud: set_visible_on_all_workspaces failed: {}", e);
         }
+        // Initial position: cursor monitor, top-center.
+        reposition_dictation_hud(app);
     }
     Ok(())
 }
