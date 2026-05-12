@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreML
 import FluidAudio
 
 struct SpeakerSegment: Codable {
@@ -230,16 +231,47 @@ func ensureStreamingModelsCached(chunkSize: StreamingChunkSize) async throws {
     try await DownloadUtils.downloadRepo(repoForChunkSize(chunkSize), to: fluidAudioCacheRoot())
 }
 
+/// Some HuggingFace repos ship only the `.mlpackage` source (e.g. the EOU
+/// 320ms variant) rather than a prebuilt `.mlmodelc`. CoreML can't load
+/// `.mlpackage` directly — has to compile it first. This is the same dance
+/// FluidAudio's own `Qwen3AsrModels.loadModel` does internally for `.mlpackage`
+/// inputs. Compilation result is cached next to the source so we only pay
+/// the cost on the first run after download.
+func ensureCompiledStreamingModels(in dir: URL) async throws {
+    let modelNames = [
+        "streaming_encoder",
+        "decoder",
+        "joint_decision",
+        "parakeet_eou_preprocessor",
+    ]
+    for name in modelNames {
+        let compiledPath = dir.appendingPathComponent("\(name).mlmodelc")
+        let packagePath = dir.appendingPathComponent("\(name).mlpackage")
+        if FileManager.default.fileExists(atPath: compiledPath.path) {
+            continue
+        }
+        guard FileManager.default.fileExists(atPath: packagePath.path) else {
+            continue
+        }
+        writeProgress("Compiling \(name)", 30)
+        let tempCompiledURL = try await MLModel.compileModel(at: packagePath)
+        try? FileManager.default.removeItem(at: compiledPath)
+        try FileManager.default.copyItem(at: tempCompiledURL, to: compiledPath)
+        try? FileManager.default.removeItem(at: tempCompiledURL)
+    }
+}
+
 func runStreamMode() async {
     do {
-        // Stick with .ms160 — its HuggingFace repo ships prebuilt
-        // streaming_encoder.mlmodelc. The .ms320 variant currently ships
-        // only .mlpackage and requires Xcode-side compilation we don't do.
-        let chunkSize: StreamingChunkSize = .ms160
+        // .ms320 — WER ~5% vs ~8% on .ms160. Extra 160ms of in-stream
+        // latency but still feels live. The 320ms HF repo ships .mlpackage
+        // only; we compile it to .mlmodelc on first launch (cached).
+        let chunkSize: StreamingChunkSize = .ms320
         let manager = StreamingEouAsrManager(chunkSize: chunkSize, eouDebounceMs: 1280)
 
         writeProgress("Loading models", 0)
         try await ensureStreamingModelsCached(chunkSize: chunkSize)
+        try await ensureCompiledStreamingModels(in: streamingModelDir(chunkSize: chunkSize))
         try await manager.loadModels(from: streamingModelDir(chunkSize: chunkSize))
         writeProgress("Loading models", 50)
 
