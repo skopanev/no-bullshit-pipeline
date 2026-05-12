@@ -1,4 +1,5 @@
 {
   "slug": "nbp",
-  "project_name": "nbp"
+  "project_name": "nbp",
+  "push_token_env": "NBP_PUSH_TOKEN"
 }
