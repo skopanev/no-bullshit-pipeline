@@ -104,9 +104,34 @@ fn find_shortcut(shortcut_id: &str) -> Option<DictationShortcut> {
 
 pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
     let state = app.state::<DictationState>();
-    if state.is_active.load(Ordering::Relaxed) {
+
+    // Atomically claim the active slot. The old load-then-late-store pattern
+    // had a wide race window (~1-3s while the streaming sidecar loaded its
+    // model) during which a second hotkey press would also pass the check
+    // and start a second concurrent setup — spawning duplicate sidecars and
+    // overwriting the in-flight Session.
+    let active_flag = state.is_active.clone();
+    if active_flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        log::warn!("dictation: start_inner rejected — already active");
         return Err("Dictation already active".into());
     }
+    // Reset the flag if we bail out before successfully installing the
+    // Session in state. RAII so we don't have to remember on every `?`.
+    struct ActiveGuard {
+        flag: Arc<AtomicBool>,
+        commit: bool,
+    }
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            if !self.commit {
+                self.flag.store(false, Ordering::Release);
+            }
+        }
+    }
+    let mut active_guard = ActiveGuard { flag: active_flag, commit: false };
 
     let shortcut = find_shortcut(shortcut_id)
         .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
@@ -308,7 +333,9 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
         .inner
         .lock()
         .map_err(|e| format!("state lock: {}", e))? = Some(session);
-    state.is_active.store(true, Ordering::Relaxed);
+    // is_active was claimed at the top via compare_exchange — commit the
+    // guard so it doesn't clear it on drop. Stays true until stop/cancel.
+    active_guard.commit = true;
 
     // Land the HUD on the monitor the user is actually looking at.
     crate::reposition_dictation_hud(app);

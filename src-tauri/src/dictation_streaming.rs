@@ -8,7 +8,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter};
@@ -17,7 +16,6 @@ use tauri_plugin_shell::ShellExt;
 use rubato::Resampler;
 
 const TARGET_RATE: u32 = 16_000;
-const READY_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -129,22 +127,13 @@ impl StreamingSession {
             }
         });
 
-        // Block start_inner until the sidecar finishes loading models, but
-        // don't hang forever if it dies first.
-        match tokio::time::timeout(Duration::from_secs(READY_TIMEOUT_SECS), ready_rx).await {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                // ready_tx dropped before signaling → sidecar terminated early
-                let err = error_text.lock().unwrap().clone();
-                return Err(err.unwrap_or_else(|| "streaming sidecar exited before ready".into()));
-            }
-            Err(_) => {
-                return Err(format!(
-                    "streaming sidecar didn't become ready within {}s",
-                    READY_TIMEOUT_SECS
-                ));
-            }
-        }
+        // Don't await the sidecar's `ready` event before returning — we want
+        // start_inner to feel instant from the user's perspective. Samples
+        // pile up in the OS stdin pipe buffer (~64KB on macOS = ~1s of 16k
+        // f32 mono) while the model loads. Once the sidecar starts reading
+        // stdin, the backlog drains and live transcription catches up. The
+        // ready_rx is still alive in case a caller wants to gate on it.
+        let _ = ready_rx;
 
         // Writer task — owns the child handle. When the sample channel closes
         // (StreamingSession dropped or finish() called), the loop exits, the

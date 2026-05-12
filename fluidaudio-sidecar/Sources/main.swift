@@ -232,9 +232,10 @@ func ensureStreamingModelsCached(chunkSize: StreamingChunkSize) async throws {
 
 func runStreamMode() async {
     do {
-        // .ms320 trades 160ms more latency for ~half the WER vs .ms160.
-        // For dictation that lands well on the latency-vs-accuracy curve.
-        let chunkSize: StreamingChunkSize = .ms320
+        // Stick with .ms160 — its HuggingFace repo ships prebuilt
+        // streaming_encoder.mlmodelc. The .ms320 variant currently ships
+        // only .mlpackage and requires Xcode-side compilation we don't do.
+        let chunkSize: StreamingChunkSize = .ms160
         let manager = StreamingEouAsrManager(chunkSize: chunkSize, eouDebounceMs: 1280)
 
         writeProgress("Loading models", 0)
