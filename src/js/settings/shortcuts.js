@@ -1,11 +1,10 @@
 // Quick Dictate shortcuts editor — Settings → Shortcuts tab.
-// Manages a list of { id, name, hotkey, engine, whisper_model, pipeline, auto_paste }.
+// Manages a list of { id, name, hotkey, engine, pipeline, auto_paste }.
 
 import { invoke } from '../core/tauri.js';
 import * as state from '../core/state.js';
 import { showToast } from '../ui/toast.js';
 import { on } from '../core/events.js';
-import { DEFAULT_WHISPER_MODEL } from '../core/constants.js';
 
 const enabledToggle = () => document.getElementById('settings-dictation-enabled');
 const listEl = () => document.getElementById('dictation-shortcuts-list');
@@ -19,10 +18,10 @@ const deleteBtn = () => document.getElementById('delete-dictation-shortcut-btn')
 const nameInput = () => document.getElementById('dict-editor-name');
 const hotkeyInput = () => document.getElementById('dict-editor-hotkey');
 const inputSourceSel = () => document.getElementById('dict-editor-input-source');
+const deviceSel = () => document.getElementById('dict-editor-device');
+const deviceField = () => document.getElementById('dict-editor-device-field');
 const engineSel = () => document.getElementById('dict-editor-engine');
 const engineField = () => document.getElementById('dict-editor-engine-field');
-const modelField = () => document.getElementById('dict-editor-model-field');
-const modelSel = () => document.getElementById('dict-editor-model');
 const pipelineSel = () => document.getElementById('dict-editor-pipeline');
 const autoPasteCb = () => document.getElementById('dict-editor-auto-paste');
 const axStatusBadge = () => document.getElementById('settings-ax-status-badge');
@@ -59,7 +58,6 @@ function emptyDraft() {
     hotkey: '',
     input_source: 'Audio',
     engine: 'FluidAudio',
-    whisper_model: DEFAULT_WHISPER_MODEL,
     device_name: null,
     pipeline: null,
     auto_paste: true,
@@ -90,9 +88,9 @@ function renderList() {
   }
 
   container.innerHTML = items.map((sc) => {
-    const inputLabel = sc.input_source === 'Clipboard' ? 'Clipboard' :
-      (sc.engine === 'LocalWhisper' ? `Mic · Local Whisper · ${escapeHtml(sc.whisper_model || 'Base')}` : `Mic · ${escapeHtml(sc.engine || '')}`);
-    const engineLabel = inputLabel;
+    const engineLabel = sc.input_source === 'Clipboard'
+      ? 'Clipboard'
+      : `Mic · ${escapeHtml(sc.engine || '')}`;
     const pipelinePart = sc.pipeline
       ? `<span class="meta-divider">·</span><span class="meta-pipe">→ ${escapeHtml(sc.pipeline)}</span>`
       : '';
@@ -137,43 +135,28 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-function prettyModelName(filename) {
-  let s = (filename || '').replace(/^ggml-/, '').replace(/\.bin$/, '');
-  s = s.replace(/-/g, ' ').replace(/\bv(\d)/, 'v$1');
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-function formatSize(bytes) {
-  if (!bytes) return '';
-  if (bytes >= 1024 * 1024 * 1024) return `~${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
-  return `~${Math.round(bytes / 1024 / 1024)} MB`;
-}
-
-async function populateModelDropdown(selected) {
-  const sel = modelSel();
+async function populateDeviceDropdown(selected) {
+  const sel = deviceSel();
   if (!sel) return;
-  sel.disabled = true;
+  // Always include System default as the first option — selected when value is null/empty.
+  let html = '<option value="">System default</option>';
   try {
-    const list = await invoke('list_whisper_models_remote', { limit: 10 });
-    const items = Array.isArray(list) ? list : [];
-    sel.innerHTML = items.map((m) => {
-      const sizeStr = formatSize(m.size_bytes);
-      const icon = m.downloaded ? '✓' : '↓';
-      const label = `${icon} ${prettyModelName(m.filename)} ${sizeStr}`.trim();
-      return `<option value="${escapeHtml(m.filename)}">${escapeHtml(label)}</option>`;
-    }).join('');
-    if (selected && !items.some((m) => m.filename === selected)) {
-      sel.insertAdjacentHTML('beforeend',
-        `<option value="${escapeHtml(selected)}">${escapeHtml(prettyModelName(selected))} (current)</option>`);
+    const list = await invoke('get_input_devices');
+    const devices = Array.isArray(list) ? list : [];
+    for (const d of devices) {
+      const tag = d.is_default ? ' (current default)' : '';
+      html += `<option value="${escapeHtml(d.name)}">${escapeHtml(d.name)}${tag}</option>`;
     }
-    if (selected) sel.value = selected;
+    // Pinned device may be currently unplugged — keep it visible so the user
+    // sees what's saved and knows the backend will fall back to default.
+    if (selected && !devices.some((d) => d.name === selected)) {
+      html += `<option value="${escapeHtml(selected)}">${escapeHtml(selected)} (unavailable — will fall back)</option>`;
+    }
   } catch (err) {
-    console.error('Failed to load whisper models:', err);
-    sel.innerHTML = '<option value="ggml-base.bin">Base (~141 MB)</option>';
-    if (selected) sel.value = selected;
-  } finally {
-    sel.disabled = false;
+    console.error('Failed to load input devices:', err);
   }
+  sel.innerHTML = html;
+  sel.value = selected || '';
 }
 
 async function populatePipelineDropdown(selected) {
@@ -199,19 +182,12 @@ async function populatePipelineDropdown(selected) {
   }
 }
 
-function syncModelFieldVisibility() {
-  const field = modelField();
-  if (!field) return;
-  field.style.display = engineSel().value === 'LocalWhisper' ? '' : 'none';
-}
-
 function syncInputSourceFields() {
   const isAudio = inputSourceSel().value === 'Audio';
   const eField = engineField();
   if (eField) eField.style.display = isAudio ? '' : 'none';
-  // Whisper model only matters when engine = LocalWhisper AND input = Audio
-  syncModelFieldVisibility();
-  if (!isAudio && modelField()) modelField().style.display = 'none';
+  const dField = deviceField();
+  if (dField) dField.style.display = isAudio ? '' : 'none';
 }
 
 async function refreshAxStatus() {
@@ -287,7 +263,7 @@ async function openEditor(id) {
   engineSel().value = data.engine || 'FluidAudio';
   autoPasteCb().checked = data.auto_paste !== false;
   syncInputSourceFields();
-  await populateModelDropdown(data.whisper_model || DEFAULT_WHISPER_MODEL);
+  await populateDeviceDropdown(data.device_name);
   await populatePipelineDropdown(data.pipeline);
   deleteBtn().style.display = draft ? '' : 'none';
   editor().style.display = '';
@@ -348,8 +324,10 @@ async function handleSave() {
     hotkey,
     input_source: inputSource,
     engine: engineSel().value,
-    whisper_model: engineSel().value === 'LocalWhisper' ? modelSel().value : null,
-    device_name: null,
+    device_name: (() => {
+      const v = (deviceSel().value || '').trim();
+      return v === '' ? null : v;
+    })(),
     pipeline: pipelineVal === '' ? null : pipelineVal,
     auto_paste: !!autoPasteCb().checked,
   };

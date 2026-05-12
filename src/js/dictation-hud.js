@@ -248,7 +248,9 @@ async function onStatus(payload) {
       setDot('done');
       statusEl.textContent = message || 'Done';
       hint.textContent = '';
-      scheduleHide(500);
+      // Cancellation is a user-initiated dismissal — hide instantly instead
+      // of the soft 500ms fade used after a normal "Done" completion.
+      scheduleHide(message === 'Cancelled' ? 0 : 500);
       break;
   }
 }

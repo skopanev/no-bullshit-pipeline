@@ -341,38 +341,10 @@
                       <button id="set-api-key-btn" class="mini-action-btn" style="display: none; white-space: nowrap; font-size: 0.75rem; padding: 4px 10px;">Set API Key</button>
                       <span class="provider-key-status key-missing" id="cloud-provider-status" role="status" aria-label="API key not configured" style="display: none; flex-shrink: 0"></span>
                       <select id="settings-transcription-provider" class="settings-select">
-                        <option value="FluidAudio">FluidAudio</option>
-                        <option value="LocalWhisper">Local Whisper</option>
+                        <option value="FluidAudio">FluidAudio (on-device, recommended)</option>
                         <option value="OpenAI">OpenAI Whisper API</option>
                         <option value="Google">Google Gemini</option>
                       </select>
-                    </div>
-                  </div>
-
-                  <!-- Local Whisper Options -->
-                  <div id="provider-local-section" style="display: none; flex-direction: column; gap: 8px">
-                    <div class="settings-item">
-                      <div class="settings-info">
-                        <label>Model Size</label>
-                        <p>Location: <span class="mono-font">~/.nbp/models/</span></p>
-                      </div>
-                      <div class="settings-input-group" style="gap: 8px; flex: 1; justify-content: flex-end">
-                        <select id="settings-whisper-model" class="settings-select" style="flex: 1; max-width: 280px">
-                          <option value="Tiny">Tiny (~39 MB)</option>
-                          <option value="Base">Base (~74 MB) - Recommended</option>
-                          <option value="Small">Small (~244 MB)</option>
-                          <option value="Medium">Medium (~769 MB)</option>
-                          <option value="Large">Large (~1.5 GB) - Best Quality</option>
-                        </select>
-                        <button id="download-model-btn" class="mini-action-btn" title="Download Model"
-                          style="width: 38px; height: 38px; padding: 0; display: flex; align-items: center; justify-content: center;">
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="7 10 12 15 17 10"></polyline>
-                            <line x1="12" y1="15" x2="12" y2="3"></line>
-                          </svg>
-                        </button>
-                      </div>
                     </div>
                   </div>
 
@@ -549,18 +521,18 @@
                     </select>
                     <p class="editor-hint">Clipboard mode runs the pipeline against whatever you have copied, no recording.</p>
                   </div>
+                  <div class="editor-field" id="dict-editor-device-field">
+                    <label>Microphone</label>
+                    <select id="dict-editor-device" class="settings-select">
+                      <option value="">System default</option>
+                    </select>
+                    <p class="editor-hint">Pin a specific mic — useful when on Bluetooth headphones (picking the built-in mic keeps music in A2DP high-quality). Falls back to System default if the chosen device isn't available.</p>
+                  </div>
                   <div class="editor-field" id="dict-editor-engine-field">
                     <label>Transcriber</label>
                     <select id="dict-editor-engine" class="settings-select">
-                      <option value="FluidAudio">FluidAudio (bundled, no model needed)</option>
-                      <option value="LocalWhisper">Local Whisper (Metal)</option>
+                      <option value="FluidAudio">FluidAudio (bundled, on-device)</option>
                       <option value="OpenAI">OpenAI Whisper API</option>
-                    </select>
-                  </div>
-                  <div class="editor-field" id="dict-editor-model-field">
-                    <label>Whisper Model</label>
-                    <select id="dict-editor-model" class="settings-select">
-                      <!-- Rendered via JS from list_whisper_models_remote -->
                     </select>
                   </div>
                   <div class="editor-field">

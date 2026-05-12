@@ -450,15 +450,11 @@ pub async fn start_realtime_transcription(
         }
     }
 
-    use crate::realtime_transcription::LocalTranscriber;
-
-    let model_size = rt_config.whisper_model.clone().unwrap_or_default();
-    let model_path = crate::config::get_models_dir().join(model_size.filename());
-
-    let transcriber = LocalTranscriber::start(app_handle, model_path, recording_id)?;
-
-    *state.realtime_transcriber.lock().map_err(|e| e.to_string())? = Some(transcriber);
-
+    // Realtime transcription is temporarily disabled — whisper-rs was removed
+    // and the FluidAudio/Apple streaming providers haven't landed yet. We
+    // accept the start call quietly so the recording flow doesn't error;
+    // the user just won't see live transcript until streaming is back.
+    let _ = (rt_config, app_handle, recording_id);
     Ok(())
 }
 

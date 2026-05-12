@@ -16,7 +16,7 @@
 //! - [`devices`] - Audio input device enumeration
 //!
 //! ### AI & Transcription
-//! - [`transcription`] - Local Whisper and cloud transcription
+//! - [`transcription`] - FluidAudio (batch via sidecar) and cloud transcription (OpenAI / Google / Anthropic)
 //! - [`cloud_ai`] - Cloud AI providers (OpenAI, Google, Anthropic)
 //! - [`templates`] - Legacy output templates for structured extraction
 //!
@@ -269,10 +269,6 @@ pub fn run() {
             permissions::open_privacy_settings,
             config::load_settings,
             config::save_settings,
-            transcription::get_whisper_models_info,
-            transcription::list_whisper_models_remote,
-            transcription::download_whisper_model,
-            transcription::delete_whisper_model,
             transcription::transcribe_recording,
             transcription::is_transcribing,
             transcription::get_transcript,
@@ -363,6 +359,7 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_toggle,
             dictation::dictation_is_active,
+            dictation::dictation_cancel,
             dictation::dictation_reload_shortcuts,
             dictation::dictation_get_registration_status,
             open_accessibility_settings,

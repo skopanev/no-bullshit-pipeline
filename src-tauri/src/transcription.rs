@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Mutex;
-use crate::config::{WhisperModelSize, TranscriptionProvider, get_models_dir, load_settings};
+use crate::config::{TranscriptionProvider, load_settings};
 use crate::storage::{get_data_dir, read_metadata};
 use crate::cloud_ai;
 use crate::transcript_migration::{TranscriptMetadata, TranscriptSource};
@@ -26,19 +26,6 @@ pub fn is_transcribing(
     state: tauri::State<'_, TranscriptionState>,
 ) -> bool {
     state.active_ids.lock().unwrap_or_else(|e| e.into_inner()).contains(&recording_id)
-}
-
-const BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ModelInfo {
-    pub size: WhisperModelSize,
-    pub filename: String,
-    pub url: String,
-    pub size_mb: Option<u64>,
-    pub exact_bytes: Option<u64>,
-    pub downloaded: bool,
-    pub path: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -85,204 +72,6 @@ struct TranscriptionProgress {
     recording_id: String,
     stage: String,
     percent: u32,
-}
-
-pub fn get_model_url(size: &WhisperModelSize) -> String {
-    format!("{}/{}", BASE_URL, size.filename())
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct RemoteWhisperModel {
-    pub filename: String,
-    pub url: String,
-    pub size_bytes: u64,
-    pub last_modified: Option<String>,
-    pub downloaded: bool,
-    pub path: String,
-}
-
-/// Return the curated short-list of Whisper models worth offering. The upstream
-/// repo (ggerganov/whisper.cpp on HF) has been frozen since Oct 2024 — there
-/// will be no new files. So we hardcode the 4 picks that cover the real
-/// trade-off space: turbo as the recommended default, its q8 quantization for
-/// users who want half the size, and base/tiny for tight CPU/memory budgets.
-///
-/// The `limit` parameter is accepted but ignored — kept in the signature so the
-/// existing frontend `invoke('list_whisper_models_remote', { limit: ... })`
-/// calls don't need to change.
-#[tauri::command]
-pub async fn list_whisper_models_remote(
-    limit: Option<u32>,
-) -> Result<Vec<RemoteWhisperModel>, String> {
-    let _ = limit;
-    let models_dir = get_models_dir();
-    if !models_dir.exists() {
-        let _ = std::fs::create_dir_all(&models_dir);
-    }
-
-    let curated: &[(&str, u64)] = &[
-        ("ggml-large-v3-turbo.bin", 1_624 * 1024 * 1024),
-        ("ggml-large-v3-turbo-q8_0.bin", 874 * 1024 * 1024),
-        ("ggml-base.bin", 148 * 1024 * 1024),
-        ("ggml-tiny.bin", 78 * 1024 * 1024),
-    ];
-
-    Ok(curated
-        .iter()
-        .map(|(f, size)| {
-            let local = models_dir.join(f);
-            let downloaded = local
-                .metadata()
-                .map(|m| m.len() >= *size)
-                .unwrap_or(false);
-            RemoteWhisperModel {
-                filename: f.to_string(),
-                url: format!("{}/{}", BASE_URL, f),
-                size_bytes: *size,
-                last_modified: None,
-                downloaded,
-                path: local.to_string_lossy().to_string(),
-            }
-        })
-        .collect())
-}
-
-#[tauri::command]
-pub async fn get_whisper_models_info() -> Result<Vec<ModelInfo>, String> {
-    // Legacy command kept for backward compat with existing UI paths.
-    // Returns the canonical 5-size set with current download status.
-    let baseline: Vec<(WhisperModelSize, u64)> = vec![
-        (WhisperModelSize::new("ggml-tiny.bin"), 74),
-        (WhisperModelSize::new("ggml-base.bin"), 141),
-        (WhisperModelSize::new("ggml-small.bin"), 465),
-        (WhisperModelSize::new("ggml-medium.bin"), 1462),
-        (WhisperModelSize::new("ggml-large-v3.bin"), 2951),
-    ];
-
-    let mut results = Vec::new();
-    let models_dir = get_models_dir();
-    if !models_dir.exists() {
-        std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
-    }
-
-    for (size, size_mb) in baseline {
-        let url = get_model_url(&size);
-        let filename = size.filename().to_string();
-        let local_path = models_dir.join(&filename);
-        let expected_bytes = size_mb * 1024 * 1024;
-        let downloaded = local_path.exists()
-            && std::fs::metadata(&local_path)
-                .map(|m| m.len() >= expected_bytes)
-                .unwrap_or(false);
-        results.push(ModelInfo {
-            size,
-            filename,
-            url,
-            size_mb: Some(size_mb),
-            exact_bytes: None,
-            downloaded,
-            path: local_path.to_string_lossy().to_string(),
-        });
-    }
-    Ok(results)
-}
-
-#[derive(Clone, Serialize)]
-struct DownloadProgress {
-    size: WhisperModelSize,
-    downloaded: u64,
-    total: u64,
-    percent: f64,
-}
-
-#[tauri::command]
-pub async fn download_whisper_model(
-    app_handle: tauri::AppHandle,
-    size: WhisperModelSize,
-) -> Result<String, String> {
-    use tokio::io::AsyncWriteExt;
-    use futures_util::StreamExt;
-
-    let url = get_model_url(&size);
-    let models_dir = get_models_dir();
-    
-    if !models_dir.exists() {
-        std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
-    }
-    
-    let filename = url.split('/').last().unwrap();
-    let file_path = models_dir.join(filename);
-    
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    // Check for partial download to resume
-    let existing_len = if file_path.exists() {
-        std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
-
-    let mut request = client.get(&url);
-    if existing_len > 0 {
-        request = request.header("Range", format!("bytes={}-", existing_len));
-    }
-
-    let res = request.send().await.map_err(|e| e.to_string())?;
-    let status = res.status();
-
-    let (total_size, mut downloaded, resume) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        // Server supports range — resume
-        let content_len = res.content_length().unwrap_or(0);
-        (existing_len + content_len, existing_len, true)
-    } else {
-        // No range support or fresh download
-        let content_len = res.content_length().unwrap_or(0);
-        (content_len, 0u64, false)
-    };
-
-    let mut file = if resume {
-        tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(&file_path)
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        tokio::fs::File::create(&file_path).await.map_err(|e| e.to_string())?
-    };
-
-    let mut stream = res.bytes_stream();
-    let mut last_emit = std::time::Instant::now();
-
-    while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
-        downloaded += chunk.len() as u64;
-
-        if last_emit.elapsed().as_millis() > 100 || downloaded == total_size {
-            let percent = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
-            let _ = app_handle.emit("download_progress", DownloadProgress {
-                size: size.clone(), downloaded, total: total_size, percent,
-            });
-            last_emit = std::time::Instant::now();
-        }
-    }
-    
-    Ok(file_path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-pub async fn delete_whisper_model(size: WhisperModelSize) -> Result<(), String> {
-    let url = get_model_url(&size);
-    let models_dir = get_models_dir();
-    let filename = url.split('/').last().unwrap();
-    let file_path = models_dir.join(filename);
-    if file_path.exists() {
-        std::fs::remove_file(file_path).map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -334,11 +123,10 @@ async fn transcribe_recording_inner(
     let _ = std::fs::remove_file(recording_dir.join("transcript.md"));
 
     let provider = settings.transcription.provider.clone();
-    let whisper_model_ref = settings.transcription.whisper_model.clone();
 
     // Shared metadata fields
     let source = match provider {
-        TranscriptionProvider::LocalWhisper | TranscriptionProvider::Unknown => TranscriptSource::Local,
+        TranscriptionProvider::Unknown => TranscriptSource::Local,
         TranscriptionProvider::FluidAudio => TranscriptSource::Fluidaudio,
         TranscriptionProvider::OpenAI => TranscriptSource::Openai,
         TranscriptionProvider::Google => TranscriptSource::Google,
@@ -434,54 +222,6 @@ async fn transcribe_recording_inner(
                 duration_sec,
                 language: Some("auto".to_string()),
                 text: Some(fa_output.text),
-            }
-        },
-        TranscriptionProvider::LocalWhisper => {
-            let model_size = settings.transcription.whisper_model.ok_or("No whisper model selected")?;
-            let url = get_model_url(&model_size);
-            let filename = url.split('/').last().unwrap();
-            let model_path = get_models_dir().join(filename);
-
-            if !model_path.exists() {
-                return Err(format!("Model not downloaded: {}", model_size.filename()));
-            }
-
-            let wav_path = recording_dir.join("temp_transcription.wav");
-            convert_ogg_to_wav(&audio_path, &wav_path)?;
-
-            let _ = app_handle.emit("transcription_progress", TranscriptionProgress {
-                recording_id: recording_id.clone(),
-                stage: "Loading model".to_string(),
-                percent: 0,
-            });
-
-            let model_p = model_path.clone();
-            let wav_p = wav_path.clone();
-            let app_h = app_handle.clone();
-            let rec_id = recording_id.clone();
-
-            let transcript = tokio::task::spawn_blocking(move || {
-                run_whisper_transcription(&model_p, &wav_p, &app_h, &rec_id)
-            }).await.map_err(|e| e.to_string())??;
-
-            let _ = std::fs::remove_file(&wav_path);
-
-            let model_name = whisper_model_ref
-                .map(|m| m.filename().trim_end_matches(".bin").trim_start_matches("ggml-").to_string())
-                .map(|s| format!("whisper-{}", s))
-                .unwrap_or_else(|| "whisper-unknown".to_string());
-            let duration_sec = read_metadata(&recording_id)
-                .ok()
-                .and_then(|m| m.audio.mix.as_ref().map(|a| a.duration_sec))
-                .unwrap_or(0.0);
-
-            TranscriptJson {
-                source,
-                model: model_name,
-                created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                duration_sec,
-                language: Some("auto".to_string()),
-                text: Some(transcript),
             }
         },
         TranscriptionProvider::OpenAI => {
@@ -898,70 +638,3 @@ fn convert_ogg_to_wav(ogg_path: &std::path::Path, wav_path: &std::path::Path) ->
     Ok(())
 }
 
-pub(crate) fn load_whisper_context(model_path: &std::path::Path) -> Result<whisper_rs::WhisperContext, String> {
-    use whisper_rs::{WhisperContext, WhisperContextParameters};
-    let params = WhisperContextParameters::default();
-    WhisperContext::new_with_params(
-        model_path.to_str().ok_or("Invalid model path")?,
-        params,
-    )
-    .map_err(|e| format!("Failed to load Whisper model: {}", e))
-}
-
-fn run_whisper_transcription(
-    model_path: &std::path::Path,
-    wav_path: &std::path::Path,
-    app_handle: &tauri::AppHandle,
-    recording_id: &str,
-) -> Result<String, String> {
-    use whisper_rs::{FullParams, SamplingStrategy};
-    use hound::WavReader;
-
-    eprintln!("[whisper] loading model...");
-    let ctx = load_whisper_context(model_path)?;
-    eprintln!("[whisper] model loaded OK");
-
-    let mut wav_reader = WavReader::open(wav_path).map_err(|e| e.to_string())?;
-    let samples: Vec<f32> = wav_reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect();
-    eprintln!("[whisper] WAV loaded: {} samples", samples.len());
-
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(None);
-    params.set_translate(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-
-    let ah = app_handle.clone();
-    let rid = recording_id.to_string();
-    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
-    params.set_progress_callback_safe(move |progress: i32| {
-        let mut last = last_emit.lock().unwrap_or_else(|e| e.into_inner());
-        if last.elapsed().as_millis() > 200 || progress >= 100 {
-            let _ = ah.emit("transcription_progress", TranscriptionProgress {
-                recording_id: rid.clone(),
-                stage: "Transcribing".to_string(),
-                percent: progress.max(0) as u32,
-            });
-            *last = std::time::Instant::now();
-        }
-    });
-
-    eprintln!("[whisper] creating state...");
-    let mut state = ctx.create_state().map_err(|e| e.to_string())?;
-    eprintln!("[whisper] running inference on {} samples...", samples.len());
-    state.full(params, &samples).map_err(|e| e.to_string())?;
-    eprintln!("[whisper] inference done");
-    
-    let mut transcript = String::new();
-    let n_segments = state.full_n_segments();
-    for i in 0..n_segments {
-        if let Some(seg) = state.get_segment(i) {
-            if let Ok(text) = seg.to_str_lossy() {
-                transcript.push_str(&text);
-                transcript.push(' ');
-            }
-        }
-    }
-    
-    Ok(transcript.trim().to_string())
-}

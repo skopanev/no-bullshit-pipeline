@@ -10,7 +10,6 @@ use std::path::PathBuf;
 pub enum TranscriptionProvider {
     #[default]
     FluidAudio,
-    LocalWhisper,
     OpenAI,
     Google,
     Anthropic,
@@ -120,59 +119,12 @@ impl ProviderConfig {
     }
 }
 
-/// Default Whisper model filename used as a fallback everywhere a model isn't
-/// explicitly configured. Single source of truth for the canonical default.
-pub const DEFAULT_WHISPER_MODEL: &str = "ggml-base.bin";
-
-/// Whisper model identifier — a bare ggml filename, e.g. "ggml-base.bin",
-/// "ggml-large-v3-turbo.bin", "ggml-base-q5_0.bin". The catalog of available
-/// models is fetched dynamically from huggingface.co/ggerganov/whisper.cpp.
-///
-/// Backwards compat: old configs storing the legacy enum names ("Tiny" /
-/// "Base" / "Small" / "Medium" / "Large") are auto-migrated on deserialize.
-#[derive(Serialize, Clone, Debug, PartialEq)]
-pub struct WhisperModelSize(pub String);
-
-impl WhisperModelSize {
-    pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-    /// The bare filename as stored in `~/.nbp/models/`
-    pub fn filename(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Default for WhisperModelSize {
-    fn default() -> Self {
-        Self(DEFAULT_WHISPER_MODEL.to_string())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for WhisperModelSize {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        let migrated = match s.as_str() {
-            "Tiny" => "ggml-tiny.bin".to_string(),
-            "Base" => "ggml-base.bin".to_string(),
-            "Small" => "ggml-small.bin".to_string(),
-            "Medium" => "ggml-medium.bin".to_string(),
-            "Large" => "ggml-large-v3.bin".to_string(),
-            _ => s,
-        };
-        Ok(WhisperModelSize(migrated))
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TranscriptionConfig {
     pub enabled: bool,
     /// Provider selection (still used by backend execution paths)
     #[serde(default)]
     pub provider: TranscriptionProvider,
-    /// Local whisper model selection (still used by backend execution paths)
-    #[serde(default)]
-    pub whisper_model: Option<WhisperModelSize>,
     /// Role-scoped API keys — persisted so the frontend UI can read them; migrated into
     /// providers map on load and on save to keep provider-first storage in sync.
     #[serde(default)]
@@ -183,12 +135,10 @@ pub struct TranscriptionConfig {
     /// Whether real-time (live) transcription is enabled
     #[serde(default)]
     pub realtime_enabled: bool,
-    /// Provider for real-time transcription (Local or OpenAI)
+    /// Provider for real-time transcription. Local Whisper has been removed;
+    /// realtime currently relies on FluidAudio (streaming WIP) and OpenAI.
     #[serde(default)]
     pub realtime_provider: RealtimeTranscriptionProvider,
-    /// Deprecated: realtime now uses whisper_model. Kept for backwards-compat deserialization.
-    #[serde(default, skip_serializing)]
-    pub realtime_model: Option<String>,
 }
 
 impl Default for TranscriptionConfig {
@@ -196,12 +146,10 @@ impl Default for TranscriptionConfig {
         Self {
             enabled: true,
             provider: TranscriptionProvider::FluidAudio,
-            whisper_model: Some(WhisperModelSize::default()),
             api_keys: ApiKeys::default(),
             api_key: None,
             realtime_enabled: false,
             realtime_provider: RealtimeTranscriptionProvider::default(),
-            realtime_model: None,
         }
     }
 }
@@ -295,9 +243,6 @@ pub struct DictationShortcut {
     /// Transcription engine for this shortcut (only used when input_source = Audio)
     #[serde(default = "default_dictation_engine")]
     pub engine: TranscriptionProvider,
-    /// Whisper model when engine = LocalWhisper
-    #[serde(default)]
-    pub whisper_model: Option<WhisperModelSize>,
     /// Mic device name override (None = system default)
     #[serde(default)]
     pub device_name: Option<String>,
@@ -311,7 +256,7 @@ pub struct DictationShortcut {
 }
 
 fn default_dictation_engine() -> TranscriptionProvider {
-    TranscriptionProvider::LocalWhisper
+    TranscriptionProvider::FluidAudio
 }
 
 fn default_true() -> bool {

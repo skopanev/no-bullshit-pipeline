@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::config::{
-    get_api_key_for_provider, get_models_dir, load_settings, DictationShortcut,
-    TranscriptionProvider,
+    get_api_key_for_provider, load_settings, DictationShortcut, TranscriptionProvider,
 };
 use crate::pipelines::{load_pipelines, ConnectorType};
 
@@ -29,7 +28,16 @@ struct Session {
     sample_rate: u32,
     channels: u16,
     stream: Option<cpal::Stream>,
+    /// Pre-duck system output volume snapshot. `Some` only when we manually
+    /// ducked — i.e., when the chosen input device differs from the system
+    /// output device (so macOS doesn't auto-route and we can't hear ourselves
+    /// over the music otherwise).
+    pre_duck_volume: Option<u32>,
 }
+
+/// Coefficient applied to the current system output volume during a session.
+/// 0.4 = duck to 40% of current.
+const VOLUME_DUCK_RATIO: f32 = 0.4;
 
 // SAFETY: cpal::Stream is !Send on macOS due to PhantomData<*mut ()>. The stream
 // is created, kept alive in the Mutex, and dropped on stop — never moved across
@@ -99,11 +107,15 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
     }
     .ok_or("No input device available")?;
 
-    let config = device
-        .default_input_config()
-        .map_err(|e| format!("default_input_config: {}", e))?;
+    let config = pick_input_config(&device)?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels();
+    log::info!(
+        "dictation: chose input config — rate={}, channels={}, format={:?}",
+        sample_rate,
+        channels,
+        config.sample_format()
+    );
 
     let samples: Arc<Mutex<Vec<f32>>> =
         Arc::new(Mutex::new(Vec::with_capacity((sample_rate as usize) * 30)));
@@ -170,12 +182,53 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         .play()
         .map_err(|e| format!("stream.play: {}", e))?;
 
+    // Duck system output volume. Snapshot the pre-duck level so stop_inner
+    // can restore to the exact original — bypasses rounding drift from the
+    // old "divide by ratio" math.
+    // Duck system output volume ONLY when the input device differs from the
+    // output device. When they're the same physical thing (typical BT case,
+    // AirPods → AirPods), macOS forces an HFP profile switch and the music
+    // already drops on its own — touching the slider then is unreliable
+    // (HFP decouples the slider from real playback level, ends up at zero).
+    let input_name = device.name().ok();
+    let output_name = host.default_output_device().and_then(|d| d.name().ok());
+    let pre_duck_volume = match (&input_name, &output_name) {
+        (Some(i), Some(o)) if i == o => {
+            log::info!(
+                "dictation: input=output ({}) — letting macOS handle audio routing, skipping fade",
+                i
+            );
+            None
+        }
+        _ => {
+            let snap = get_system_output_volume();
+            if let Some(now) = snap {
+                let target = ((now as f32) * VOLUME_DUCK_RATIO).round().max(1.0) as u32;
+                log::info!(
+                    "dictation: input={:?}, output={:?} — ducking {} → {}",
+                    input_name,
+                    output_name,
+                    now,
+                    target
+                );
+                fade_system_volume(now, target, 750);
+            }
+            snap
+        }
+    };
+
+    // While dictation is live, hijack Escape to cancel the session — the user
+    // can wave it off without their text leaking out as a paste. The shortcut
+    // is unregistered as soon as the session ends (stop or cancel).
+    register_escape_cancel(app);
+
     let session = Session {
         shortcut_id: shortcut.id.clone(),
         samples,
         sample_rate,
         channels,
         stream: Some(stream),
+        pre_duck_volume,
     };
 
     *state
@@ -217,8 +270,19 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
         }
     };
 
-    drop(session.stream.take());
     let shortcut_id = session.shortcut_id.clone();
+    unregister_escape_cancel(app);
+
+    // Grace period: let the last ~250ms of audio reach the cpal callback
+    // before we drop the stream. Otherwise the tail of the last word is
+    // truncated because the OS audio queue hasn't flushed yet.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    drop(session.stream.take());
+
+    if let Some(orig) = session.pre_duck_volume {
+        restore_system_volume_to(orig);
+    }
+
 
     let raw_samples = {
         let s = session
@@ -245,14 +309,41 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     );
     emit_status(app, "transcribing", Some(&shortcut_id), None);
 
-    let mono = downmix_to_mono(&raw_samples, session.channels);
+    log::info!(
+        "dictation: pipeline start — raw_samples={}, channels={}, rate={}",
+        raw_samples.len(),
+        session.channels,
+        session.sample_rate
+    );
+
+    let t0 = std::time::Instant::now();
+    let normalized = normalize_loudness(&raw_samples, session.channels, session.sample_rate);
+    log::info!("dictation: normalize_loudness {:?}", t0.elapsed());
+
+    let t1 = std::time::Instant::now();
+    let mono = downmix_to_mono(&normalized, session.channels);
+    log::info!("dictation: downmix_to_mono {:?}", t1.elapsed());
+
+    let t2 = std::time::Instant::now();
     let mono_16k = if session.sample_rate == TARGET_RATE {
         mono
     } else {
         resample_mono(&mono, session.sample_rate, TARGET_RATE)?
     };
+    log::info!(
+        "dictation: resample_mono {:?} (skipped={}, out_samples={})",
+        t2.elapsed(),
+        session.sample_rate == TARGET_RATE,
+        mono_16k.len()
+    );
 
+    let t3 = std::time::Instant::now();
     let transcript = transcribe(app, &shortcut, mono_16k).await?;
+    log::info!(
+        "dictation: transcribe {:?} (engine={:?})",
+        t3.elapsed(),
+        shortcut.engine
+    );
     let trimmed = transcript.trim().to_string();
     if trimmed.is_empty() {
         emit_status(app, "idle", Some(&shortcut_id), Some("No speech detected".into()));
@@ -359,16 +450,6 @@ async fn transcribe(
     mono_16k: Vec<f32>,
 ) -> Result<String, String> {
     match &shortcut.engine {
-        TranscriptionProvider::LocalWhisper => {
-            let model_size = shortcut.whisper_model.clone().unwrap_or_default();
-            let model_path = get_models_dir().join(model_size.filename());
-            if !model_path.exists() {
-                return Err(format!("Whisper model not downloaded: {}", model_size.filename()));
-            }
-            tokio::task::spawn_blocking(move || run_local_whisper(&model_path, &mono_16k))
-                .await
-                .map_err(|e| format!("join: {}", e))?
-        }
         TranscriptionProvider::FluidAudio => run_fluidaudio(app, &mono_16k).await,
         TranscriptionProvider::OpenAI => {
             let settings = load_settings();
@@ -428,9 +509,76 @@ async fn run_text_pipeline(text: &str, pipeline_name: &str) -> Result<String, St
 
 // --- Tauri commands -------------------------------------------------------
 
+/// Cancel an in-flight dictation session: stop the mic, drop the samples, hide
+/// the HUD, restore volume. No transcription, no paste, no clipboard write.
+pub fn cancel_inner(app: &AppHandle) {
+    let session = {
+        let state = app.state::<DictationState>();
+        let mut guard = match state.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let s = guard.take();
+        state.is_active.store(false, Ordering::Relaxed);
+        s
+    };
+    let mut session = match session {
+        Some(s) => s,
+        None => return,
+    };
+    drop(session.stream.take());
+    unregister_escape_cancel(app);
+    if let Some(orig) = session.pre_duck_volume {
+        restore_system_volume_to(orig);
+    }
+
+    log::info!("dictation: '{}' cancelled via Escape", session.shortcut_id);
+    emit_status(
+        app,
+        "idle",
+        Some(&session.shortcut_id),
+        Some("Cancelled".into()),
+    );
+}
+
+fn register_escape_cancel(app: &AppHandle) {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+        let app_clone = app.clone();
+        let result = app
+            .global_shortcut()
+            .on_shortcut("Escape", move |_app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                let app = app_clone.clone();
+                tauri::async_runtime::spawn(async move {
+                    cancel_inner(&app);
+                });
+            });
+        if let Err(e) = result {
+            log::warn!("dictation: failed to register Escape cancel: {}", e);
+        }
+    }
+}
+
+fn unregister_escape_cancel(app: &AppHandle) {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_global_shortcut::GlobalShortcutExt;
+        let _ = app.global_shortcut().unregister("Escape");
+    }
+}
+
 #[tauri::command]
 pub fn dictation_start(app: AppHandle, shortcut_id: String) -> Result<(), String> {
     start_inner(&app, &shortcut_id)
+}
+
+#[tauri::command]
+pub fn dictation_cancel(app: AppHandle) {
+    cancel_inner(&app);
 }
 
 #[tauri::command]
@@ -472,6 +620,28 @@ pub fn dictation_reload_shortcuts(
 
 // --- audio helpers --------------------------------------------------------
 
+/// Quick peak normalize: find the loudest sample, apply uniform gain to lift
+/// it toward `target_peak` (with a hard `max_gain` cap so we don't blow up
+/// silence into noise). Single pass, ~40× faster than EBU R128 on big buffers.
+/// Whisper is robust to absolute level — what matters is that quiet speech
+/// reaches a reasonable amplitude before transcription.
+fn normalize_loudness(interleaved: &[f32], _channels: u16, _sample_rate: u32) -> Vec<f32> {
+    const TARGET_PEAK: f32 = 0.7;
+    const MAX_GAIN: f32 = 20.0;
+    if interleaved.is_empty() {
+        return Vec::new();
+    }
+    let max_abs = interleaved.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+    if max_abs < 1e-4 {
+        return interleaved.to_vec();
+    }
+    let gain = (TARGET_PEAK / max_abs).min(MAX_GAIN);
+    if gain <= 1.0 {
+        return interleaved.to_vec();
+    }
+    interleaved.iter().map(|&s| (s * gain).clamp(-1.0, 1.0)).collect()
+}
+
 fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
     if channels <= 1 {
         return interleaved.to_vec();
@@ -484,31 +654,30 @@ fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
 }
 
 fn resample_mono(input: &[f32], src_rate: u32, dst_rate: u32) -> Result<Vec<f32>, String> {
-    use rubato::{
-        Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-    };
+    use rubato::{FftFixedInOut, Resampler};
 
-    let chunk_size = 1024usize;
-    let params = SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
-    };
-    let ratio = dst_rate as f64 / src_rate as f64;
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk_size, 1)
-        .map_err(|e| format!("resampler init: {}", e))?;
+    // FFT-based resampler — orders of magnitude faster than the polyphase
+    // Sinc path for integer ratios like 48k→16k (gcd=16k, ratio 3:1). Quality
+    // is more than adequate for speech-to-text.
+    let mut resampler = FftFixedInOut::<f32>::new(
+        src_rate as usize,
+        dst_rate as usize,
+        1024,
+        1,
+    )
+    .map_err(|e| format!("resampler init: {}", e))?;
 
-    let mut output = Vec::with_capacity(((input.len() as f64) * ratio) as usize + chunk_size);
+    let chunk_in = resampler.input_frames_next();
+    let mut output =
+        Vec::with_capacity(((input.len() * dst_rate as usize) / src_rate as usize) + 256);
     let mut pos = 0;
-    while pos + chunk_size <= input.len() {
-        let chunk = vec![&input[pos..pos + chunk_size]];
+    while pos + chunk_in <= input.len() {
+        let chunk = vec![&input[pos..pos + chunk_in]];
         let res = resampler
             .process(&chunk, None)
             .map_err(|e| format!("resample: {}", e))?;
         output.extend(&res[0]);
-        pos += chunk_size;
+        pos += chunk_in;
     }
     if pos < input.len() {
         let chunk = vec![&input[pos..]];
@@ -538,37 +707,6 @@ fn write_mono_wav(
     }
     w.finalize().map_err(|e| format!("wav finalize: {}", e))?;
     Ok(())
-}
-
-fn run_local_whisper(
-    model_path: &std::path::Path,
-    samples_16k: &[f32],
-) -> Result<String, String> {
-    use whisper_rs::{FullParams, SamplingStrategy};
-
-    let ctx = crate::transcription::load_whisper_context(model_path)?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_language(None);
-    params.set_translate(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    let mut state = ctx
-        .create_state()
-        .map_err(|e| format!("whisper state: {}", e))?;
-    state
-        .full(params, samples_16k)
-        .map_err(|e| format!("whisper full: {}", e))?;
-    let mut text = String::new();
-    let n = state.full_n_segments();
-    for i in 0..n {
-        if let Some(seg) = state.get_segment(i) {
-            if let Ok(s) = seg.to_str_lossy() {
-                text.push_str(&s);
-                text.push(' ');
-            }
-        }
-    }
-    Ok(text.trim().to_string())
 }
 
 #[derive(serde::Deserialize)]
@@ -623,6 +761,103 @@ async fn run_fluidaudio(app: &AppHandle, samples_16k: &[f32]) -> Result<String, 
     let out: FluidOut = serde_json::from_slice(&stdout_buf)
         .map_err(|e| format!("parse FluidAudio output: {}", e))?;
     Ok(out.text)
+}
+
+/// Pick the smallest-overhead input config the device supports. Preference
+/// order: 16 kHz mono (Whisper's native rate — no resample/downmix at all),
+/// then 16 kHz multichannel (only downmix), then whatever the device defaults
+/// to. Built-in MacBook mics typically advertise 16 kHz mono.
+fn pick_input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    const PREFERRED_RATE: u32 = TARGET_RATE;
+    let configs: Vec<cpal::SupportedStreamConfigRange> = device
+        .supported_input_configs()
+        .map(|it| it.collect())
+        .unwrap_or_default();
+
+    for c in &configs {
+        log::info!(
+            "dictation: cpal advertises — channels={}, rate_range={}..={}, format={:?}",
+            c.channels(),
+            c.min_sample_rate().0,
+            c.max_sample_rate().0,
+            c.sample_format()
+        );
+    }
+
+    let rate_ok = |cfg: &cpal::SupportedStreamConfigRange| {
+        cfg.min_sample_rate().0 <= PREFERRED_RATE && cfg.max_sample_rate().0 >= PREFERRED_RATE
+    };
+
+    if let Some(cfg) = configs.iter().find(|c| c.channels() == 1 && rate_ok(c)) {
+        return Ok(cfg.clone().with_sample_rate(cpal::SampleRate(PREFERRED_RATE)));
+    }
+    if let Some(cfg) = configs.iter().find(|c| rate_ok(c)) {
+        return Ok(cfg.clone().with_sample_rate(cpal::SampleRate(PREFERRED_RATE)));
+    }
+    device
+        .default_input_config()
+        .map_err(|e| format!("default_input_config: {}", e))
+}
+
+fn restore_system_volume_to(target: u32) {
+    let now = get_system_output_volume();
+    log::info!("dictation: restoring volume — current={:?}, target={}", now, target);
+    if let Some(now) = now {
+        if target != now {
+            fade_system_volume(now, target, 750);
+        }
+    }
+}
+
+fn get_system_output_volume() -> Option<u32> {
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("output volume of (get volume settings)")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok()
+}
+
+// Tracks the previously-spawned fade osascript so we can kill it when a new
+// fade starts — otherwise an in-flight down-fade keeps clobbering the up-fade.
+static ACTIVE_FADE: std::sync::OnceLock<std::sync::Mutex<Option<std::process::Child>>> =
+    std::sync::OnceLock::new();
+
+fn active_fade_slot() -> &'static std::sync::Mutex<Option<std::process::Child>> {
+    ACTIVE_FADE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn fade_system_volume(from: u32, to: u32, duration_ms: u64) {
+    if let Ok(mut guard) = active_fade_slot().lock() {
+        if let Some(mut prev) = guard.take() {
+            let _ = prev.kill();
+            let _ = prev.wait();
+        }
+    }
+
+    // Each AppleScript iteration carries ~20-30ms unavoidable overhead
+    // (set volume + delay + Core Audio round-trip). With many steps the
+    // wall-clock drifts way past the requested duration. Use a small fixed
+    // step count so the perceived fade matches `duration_ms`.
+    const STEPS: u64 = 6;
+    let step_delay = (duration_ms as f64) / (STEPS as f64) / 1000.0;
+    let steps = STEPS;
+    let script = format!(
+        "set startV to {}\nset endV to {}\nset steps to {}\nrepeat with i from 1 to steps\n  set v to startV + ((endV - startV) * i / steps)\n  set volume output volume v\n  delay {:.4}\nend repeat",
+        from, to, steps, step_delay
+    );
+    if let Ok(child) = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn()
+    {
+        if let Ok(mut guard) = active_fade_slot().lock() {
+            *guard = Some(child);
+        }
+    }
 }
 
 fn read_clipboard() -> Result<String, String> {
