@@ -24,7 +24,9 @@ console.log('dictation-hud: script loaded');
 
 let levelTimer = null;
 let hideTimer = null;
-let lastShortcutId = null;
+// Cache of shortcut_id → hotkey string so we don't re-query settings on every
+// recording start. Populated on demand from the dictation_status payload.
+const hotkeyCache = new Map();
 
 function showHud() {
   clearTimeout(hideTimer);
@@ -126,13 +128,6 @@ async function onStatus(payload) {
   const { state, message, shortcut_id } = payload;
   console.log('dictation-hud: state →', state, shortcut_id || '');
 
-  if (state === 'recording' && shortcut_id && shortcut_id !== lastShortcutId) {
-    lastShortcutId = shortcut_id;
-    fetchCurrentHotkey(shortcut_id).then((hk) => {
-      if (hk) hint.textContent = `${prettyHotkey(hk)} again to stop`;
-    });
-  }
-
   switch (state) {
     case 'recording':
       showHud();
@@ -141,6 +136,22 @@ async function onStatus(payload) {
       meter.style.display = '';
       startLevelPolling();
       setActionButton(null);
+      // Always (re)show the "<hotkey> again to stop" hint on recording start.
+      // Use the cache when we already know the binding to avoid a settings
+      // roundtrip on every press of an existing shortcut.
+      if (shortcut_id) {
+        const cached = hotkeyCache.get(shortcut_id);
+        if (cached) {
+          hint.textContent = `${prettyHotkey(cached)} again to stop`;
+        } else {
+          fetchCurrentHotkey(shortcut_id).then((hk) => {
+            if (hk) {
+              hotkeyCache.set(shortcut_id, hk);
+              hint.textContent = `${prettyHotkey(hk)} again to stop`;
+            }
+          });
+        }
+      }
       break;
     case 'reading_clipboard':
       showHud();
