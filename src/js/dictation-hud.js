@@ -22,6 +22,7 @@ const meter = document.getElementById('meter');
 const bars = Array.from(meter.querySelectorAll('.bar'));
 const hint = document.getElementById('hint');
 const actionBtn = document.getElementById('action-btn');
+const partialEl = document.getElementById('partial');
 
 if (card && hud && typeof hud.startDragging === 'function') {
   card.addEventListener('mousedown', (e) => {
@@ -203,6 +204,7 @@ async function onStatus(payload) {
       meter.style.display = '';
       startLevelPolling();
       setActionButton(null);
+      if (partialEl) { partialEl.textContent = ''; partialEl.classList.remove('visible'); }
       // Always (re)show the "<hotkey> again to stop" hint on recording start.
       // Use the cache when we already know the binding to avoid a settings
       // roundtrip on every press of an existing shortcut.
@@ -296,6 +298,7 @@ async function onStatus(payload) {
     default:
       stopAllMeters();
       setDot('done');
+      if (partialEl) { partialEl.textContent = ''; partialEl.classList.remove('visible'); }
       statusEl.textContent = message || 'Done';
       hint.textContent = '';
       // Cancellation is a user-initiated dismissal — hide instantly instead
@@ -314,3 +317,16 @@ listen('dictation_status', (event) => {
 })
   .then(() => console.log('dictation-hud: subscribed to dictation_status'))
   .catch((e) => console.error('dictation-hud: subscribe failed', e));
+
+// Streaming partials emitted by dictation_streaming.rs as the user talks.
+// We render them inline so the user sees their words land in real time.
+listen('dictation_partial', (event) => {
+  try {
+    const text = event?.payload?.text || '';
+    if (!partialEl) return;
+    partialEl.textContent = text;
+    partialEl.classList.toggle('visible', text.length > 0);
+  } catch (e) {
+    console.error('hud partial err', e);
+  }
+});

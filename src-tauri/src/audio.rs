@@ -439,7 +439,7 @@ pub async fn start_realtime_transcription(
 
     let settings = crate::config::load_settings();
     let rt_config = &settings.transcription;
-    if !rt_config.realtime_enabled {
+    if !rt_config.realtime_supported() {
         return Ok(());
     }
 

@@ -232,7 +232,9 @@ func ensureStreamingModelsCached(chunkSize: StreamingChunkSize) async throws {
 
 func runStreamMode() async {
     do {
-        let chunkSize: StreamingChunkSize = .ms160
+        // .ms320 trades 160ms more latency for ~half the WER vs .ms160.
+        // For dictation that lands well on the latency-vs-accuracy curve.
+        let chunkSize: StreamingChunkSize = .ms320
         let manager = StreamingEouAsrManager(chunkSize: chunkSize, eouDebounceMs: 1280)
 
         writeProgress("Loading models", 0)

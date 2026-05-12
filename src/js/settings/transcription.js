@@ -9,7 +9,6 @@ import { isKeyMasked } from '../core/utils.js';
 const transcriptionEnabledCheckbox = document.getElementById('settings-transcription-enabled');
 const transcriptionDetailsEl = document.getElementById('transcription-details');
 const transcriptionProviderSelect = document.getElementById('settings-transcription-provider');
-const realtimeEnabledCheckbox = document.getElementById('settings-realtime-enabled');
 
 const PROVIDER_KEY_MAP = { OpenAI: 'openai', Google: 'google' };
 
@@ -100,7 +99,6 @@ export function applyTranscriptionSettings() {
   if (!state.appSettings?.transcription) return;
   if (transcriptionEnabledCheckbox) { transcriptionEnabledCheckbox.checked = state.appSettings.transcription.enabled; updateTranscriptionVisibility(); }
   if (transcriptionProviderSelect) transcriptionProviderSelect.value = state.appSettings.transcription.provider;
-  if (realtimeEnabledCheckbox) realtimeEnabledCheckbox.checked = !!state.appSettings.transcription.realtime_enabled;
   updateProviderVisibility();
   updateTranscriptionProviderWarnings();
 }
@@ -109,7 +107,6 @@ export function collectTranscriptionSettings() {
   if (!state.appSettings.transcription) state.appSettings.transcription = {};
   state.appSettings.transcription.enabled = transcriptionEnabledCheckbox?.checked || false;
   state.appSettings.transcription.provider = transcriptionProviderSelect?.value || 'FluidAudio';
-  state.appSettings.transcription.realtime_enabled = realtimeEnabledCheckbox?.checked || false;
 
   if (!state.appSettings.transcription.api_keys) state.appSettings.transcription.api_keys = {};
   if (!state.appSettings.providers) state.appSettings.providers = {};

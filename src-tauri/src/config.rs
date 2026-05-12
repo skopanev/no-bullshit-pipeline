@@ -132,13 +132,22 @@ pub struct TranscriptionConfig {
     // Very old single-key legacy field — read-only for migration, never written
     #[serde(skip_serializing, default)]
     pub api_key: Option<String>,
-    /// Whether real-time (live) transcription is enabled
-    #[serde(default)]
+    /// Realtime-vs-batch is no longer a user toggle — driven by the chosen
+    /// provider. Kept for backwards-compat deserialization of older configs
+    /// so they don't fail to load, but the field is ignored at runtime.
+    #[serde(default, skip_serializing)]
     pub realtime_enabled: bool,
-    /// Provider for real-time transcription. Local Whisper has been removed;
-    /// realtime currently relies on FluidAudio (streaming WIP) and OpenAI.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub realtime_provider: RealtimeTranscriptionProvider,
+}
+
+impl TranscriptionConfig {
+    /// Whether the currently-selected provider supports streaming/realtime
+    /// transcription. The "Real-time" UI toggle was removed; the provider
+    /// choice alone determines the mode.
+    pub fn realtime_supported(&self) -> bool {
+        matches!(self.provider, TranscriptionProvider::FluidAudio)
+    }
 }
 
 impl Default for TranscriptionConfig {

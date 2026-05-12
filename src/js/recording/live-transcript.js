@@ -21,7 +21,9 @@ function renderLiveTranscript(text) {
 export async function startLiveTranscript(recordingId) {
   const generation = ++liveTranscriptGeneration;
 
-  if (!state.appSettings?.transcription?.realtime_enabled) return;
+  // Live transcript is now driven by the provider — only providers that ship
+  // a streaming sidecar (currently FluidAudio) emit realtime_transcript_*.
+  if (state.appSettings?.transcription?.provider !== 'FluidAudio') return;
 
   const panel = document.getElementById('live-transcript-panel');
   if (panel) panel.style.display = '';
