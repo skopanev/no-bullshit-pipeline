@@ -339,19 +339,32 @@ struct FluidAudioSidecar {
             writeError("File not found: \(wavPath)")
         }
 
+        func elapsed(_ since: CFAbsoluteTime) -> String {
+            String(format: "%.3fs", CFAbsoluteTimeGetCurrent() - since)
+        }
+        func tick(_ label: String, _ since: CFAbsoluteTime) {
+            FileHandle.standardError.write(Data("TIMING:\(label):\(elapsed(since))\n".utf8))
+        }
+
         do {
             let cached = modelsAreCached()
 
             writeProgress("Preparing models", 0)
 
             if !cached { writeProgress("Downloading ASR model", 5) }
+            let tDownload = CFAbsoluteTimeGetCurrent()
             let asrModels = try await AsrModels.downloadAndLoad(version: .v3)
+            tick("asrModels.downloadAndLoad", tDownload)
+
+            let tInit = CFAbsoluteTimeGetCurrent()
             let asrManager = AsrManager(config: .default)
             // FluidAudio 0.14.5: loadModels replaces the old initialize(models:).
             try await asrManager.loadModels(asrModels)
+            tick("asrManager.loadModels", tInit)
             writeProgress("Preparing models", 15)
 
             if !cached { writeProgress("Downloading diarizer", 20) }
+            let tDiarInit = CFAbsoluteTimeGetCurrent()
             var diarizerConfig = OfflineDiarizerConfig()
             diarizerConfig.clusteringThreshold = 0.12
             diarizerConfig.embeddingExcludeOverlap = false
@@ -360,6 +373,7 @@ struct FluidAudioSidecar {
             diarizerConfig.clustering.minSpeakers = 2
             let diarizerManager = OfflineDiarizerManager(config: diarizerConfig)
             try await diarizerManager.prepareModels()
+            tick("diarizer.prepareModels", tDiarInit)
             writeProgress("Preparing models", 25)
 
             writeProgress("Transcribing", 25)
@@ -373,13 +387,17 @@ struct FluidAudioSidecar {
             }
 
             // FluidAudio 0.14.5: transcribe takes an inout decoder state.
+            let tTranscribe = CFAbsoluteTimeGetCurrent()
             var decoderState = try TdtDecoderState()
             let asrResult = try await asrManager.transcribe(fileURL, decoderState: &decoderState)
+            tick("asrManager.transcribe", tTranscribe)
             progressTask.cancel()
             writeProgress("Transcribing", 60)
 
             writeProgress("Diarization", 60)
+            let tDiarize = CFAbsoluteTimeGetCurrent()
             let diarizationResult = try await diarizerManager.process(fileURL)
+            tick("diarizer.process", tDiarize)
             writeProgress("Diarization", 90)
 
             writeProgress("Finalizing", 90)
@@ -405,7 +423,11 @@ struct FluidAudioSidecar {
             FileHandle.standardOutput.write(json)
             FileHandle.standardOutput.write(Data("\n".utf8))
 
-            await asrManager.cleanup()
+            // Skip the explicit `await asrManager.cleanup()` — it unloads the
+            // 600MB CoreML model synchronously which delays process exit
+            // (Rust sees Terminated late and counts it as transcribe time).
+            // The OS frees everything on exit anyway.
+            exit(0)
         } catch {
             writeError(error.localizedDescription)
         }
