@@ -20,6 +20,10 @@ pub struct DictationState {
     pub is_active: Arc<AtomicBool>,
     inner: Mutex<Option<Session>>,
     pub last_registration: Mutex<Vec<crate::ShortcutRegistration>>,
+    /// Pre-warmed streaming sidecar — kept idle in the background so the
+    /// first hotkey press never pays the model-load cost. Filled by a task
+    /// spawned during app setup (see `prewarm_streaming` below).
+    pub warm_streaming: Arc<Mutex<Option<crate::dictation_streaming::StreamingSession>>>,
 }
 
 struct Session {
@@ -62,8 +66,56 @@ impl DictationState {
             is_active: Arc::new(AtomicBool::new(false)),
             inner: Mutex::new(None),
             last_registration: Mutex::new(Vec::new()),
+            warm_streaming: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+/// Default capture rate/channels we pre-warm for. Built-in MacBook mic and
+/// most USB mics natively expose 48 kHz mono — if the user later pins a
+/// device with a different rate, we fall back to spawning a fresh inline
+/// session in start_inner.
+const PREWARM_RATE: u32 = 48_000;
+const PREWARM_CHANNELS: u16 = 1;
+
+/// Spawn a background task that fills the warm-streaming slot. Called at app
+/// setup AND after every shortcut press that consumed the warm session, so
+/// the next press also feels instant.
+pub fn schedule_warm_streaming(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<DictationState>();
+        // Skip if there's already a warm session in the slot.
+        {
+            let guard = match state.warm_streaming.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if guard.is_some() {
+                return;
+            }
+        }
+        log::info!("dictation: warming streaming sidecar in background");
+        match crate::dictation_streaming::StreamingSession::start(
+            &app,
+            String::new(),
+            PREWARM_RATE,
+            PREWARM_CHANNELS,
+        )
+        .await
+        {
+            Ok(session) => {
+                let state = app.state::<DictationState>();
+                if let Ok(mut guard) = state.warm_streaming.lock() {
+                    *guard = Some(session);
+                    log::info!("dictation: warm streaming sidecar ready");
+                }
+            }
+            Err(e) => {
+                log::warn!("dictation: failed to warm streaming sidecar: {}", e);
+            }
+        }
+    });
 }
 
 /// Read-only snapshot of the most recent shortcut-registration result, used
@@ -154,28 +206,56 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
         config.sample_format()
     );
 
-    // Spawn the streaming sidecar BEFORE opening the cpal input stream — the
-    // sidecar blocks until its CoreML model loads (~1-3s on cold start), and
-    // we want zero samples to fall on the floor between cpal.play() and the
-    // sidecar being ready to consume them. Only do this for engines that
-    // ship a streaming sidecar; everything else stays on the batch path.
+    // Streaming setup. Three tiers:
+    //   1) Warm pool — sidecar pre-spawned at app startup, model already
+    //      loaded. Instant: just claim it.
+    //   2) Fresh inline spawn — fallback when the warm slot is empty (first
+    //      press before warm-up finished, or shortcut uses an exotic rate).
+    //   3) Batch path — for non-streaming engines.
     let streaming = if matches!(shortcut.engine, TranscriptionProvider::FluidAudio)
         && matches!(shortcut.input_source, crate::config::DictationInputSource::Audio)
     {
-        match crate::dictation_streaming::StreamingSession::start(
-            app,
-            shortcut.id.clone(),
-            sample_rate,
-            channels,
-        )
-        .await
-        {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!("dictation: streaming sidecar failed ({}); falling back to batch", e);
+        let warm = state.warm_streaming.lock().ok().and_then(|mut g| {
+            let candidate = g.take()?;
+            if candidate.source_rate == sample_rate && candidate.source_channels == channels {
+                Some(candidate)
+            } else {
+                log::info!(
+                    "dictation: warm streaming rate mismatch (warm={}/{}, device={}/{}); spawning fresh",
+                    candidate.source_rate,
+                    candidate.source_channels,
+                    sample_rate,
+                    channels
+                );
+                // Drop the mismatched warm session — its resampler can't be reused.
+                drop(candidate);
                 None
             }
-        }
+        });
+        let session = if let Some(w) = warm {
+            log::info!("dictation: using pre-warmed streaming sidecar");
+            Some(w)
+        } else {
+            match crate::dictation_streaming::StreamingSession::start(
+                app,
+                shortcut.id.clone(),
+                sample_rate,
+                channels,
+            )
+            .await
+            {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    log::warn!("dictation: streaming sidecar failed ({}); falling back to batch", e);
+                    None
+                }
+            }
+        };
+        // Refill the warm pool in the background regardless of which tier we
+        // ended up on — by the time the user finishes this session, the next
+        // sidecar is ready.
+        schedule_warm_streaming(app);
+        session
     } else {
         None
     };

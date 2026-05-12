@@ -36,6 +36,12 @@ pub struct StreamingSession {
     /// Public so the cpal callback can clone the sender. cpal::Stream is `!Send`
     /// on macOS so the streaming object itself can't be moved into the callback.
     pub samples_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+    /// Source sample rate the internal resampler was built for. Used by the
+    /// warm-pool consumer to verify compatibility with the chosen cpal device.
+    pub source_rate: u32,
+    /// Source channel count (raw cpal interleaved before downmix). Same role
+    /// as `source_rate` for the warm-pool match check.
+    pub source_channels: u16,
     final_text: Arc<Mutex<Option<String>>>,
     error_text: Arc<Mutex<Option<String>>>,
     reader_task: tauri::async_runtime::JoinHandle<()>,
@@ -184,6 +190,8 @@ impl StreamingSession {
 
         Ok(Self {
             samples_tx,
+            source_rate,
+            source_channels,
             final_text,
             error_text,
             reader_task,

@@ -249,6 +249,14 @@ pub fn run() {
                 }
             }
 
+            // Pre-warm the streaming sidecar so the first shortcut press
+            // doesn't pay the 1-3s model-load cost. Runs entirely in the
+            // background — failures are logged and the user just falls back
+            // to the inline spawn path on first press.
+            if settings.dictation.enabled {
+                dictation::schedule_warm_streaming(app.handle());
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
