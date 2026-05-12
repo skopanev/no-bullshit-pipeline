@@ -1,10 +1,11 @@
 //! Streaming bridge between the cpal mic input and `fluidaudio-sidecar --stream`.
 //!
-//! Spawns the sidecar on `start`, pipes downmixed/resampled 16 kHz mono f32
-//! PCM into its stdin while the user is talking, reads NDJSON events back
-//! (`ready`/`partial`/`final`/`error`) from stdout. On `finish` the sample
-//! channel is closed which drops the child → EOF on stdin → sidecar flushes
-//! and exits with the consolidated transcript.
+//! Currently dormant — `dictation::start_inner` keeps streaming off because
+//! the Parakeet EOU model is English-biased. Batch Parakeet TDT v3 handles
+//! multilingual speech far better. Kept here so we can flip streaming back
+//! on once a comparable multilingual model lands.
+
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

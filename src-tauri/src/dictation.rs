@@ -81,6 +81,7 @@ const PREWARM_CHANNELS: u16 = 1;
 /// Spawn a background task that fills the warm-streaming slot. Called at app
 /// setup AND after every shortcut press that consumed the warm session, so
 /// the next press also feels instant.
+#[allow(dead_code)]
 pub fn schedule_warm_streaming(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -212,54 +213,15 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     //   2) Fresh inline spawn — fallback when the warm slot is empty (first
     //      press before warm-up finished, or shortcut uses an exotic rate).
     //   3) Batch path — for non-streaming engines.
-    let streaming = if matches!(shortcut.engine, TranscriptionProvider::FluidAudio)
-        && matches!(shortcut.input_source, crate::config::DictationInputSource::Audio)
-    {
-        let warm = state.warm_streaming.lock().ok().and_then(|mut g| {
-            let candidate = g.take()?;
-            if candidate.source_rate == sample_rate && candidate.source_channels == channels {
-                Some(candidate)
-            } else {
-                log::info!(
-                    "dictation: warm streaming rate mismatch (warm={}/{}, device={}/{}); spawning fresh",
-                    candidate.source_rate,
-                    candidate.source_channels,
-                    sample_rate,
-                    channels
-                );
-                // Drop the mismatched warm session — its resampler can't be reused.
-                drop(candidate);
-                None
-            }
-        });
-        let session = if let Some(w) = warm {
-            log::info!("dictation: using pre-warmed streaming sidecar");
-            Some(w)
-        } else {
-            match crate::dictation_streaming::StreamingSession::start(
-                app,
-                shortcut.id.clone(),
-                sample_rate,
-                channels,
-            )
-            .await
-            {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    log::warn!("dictation: streaming sidecar failed ({}); falling back to batch", e);
-                    None
-                }
-            }
-        };
-        // Refill the warm pool in the background regardless of which tier we
-        // ended up on — by the time the user finishes this session, the next
-        // sidecar is ready.
-        schedule_warm_streaming(app);
-        session
-    } else {
-        None
-    };
-    let streaming_tx = streaming.as_ref().map(|s| s.samples_tx.clone());
+    // Streaming is DISABLED — Parakeet EOU 120M (the streaming model) is
+    // English-biased and butchers non-English speech. Always taking the
+    // batch path (Parakeet TDT v3, multilingual) until we get an equally
+    // good streaming model. Code path kept above as dormant scaffolding.
+    let _ = sample_rate; // silence unused warnings for streaming-only refs
+    let _ = channels;
+    let streaming: Option<crate::dictation_streaming::StreamingSession> = None;
+    let streaming_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>> =
+        streaming.as_ref().map(|s| s.samples_tx.clone());
 
     // Fresh meter state per session — last shortcut's mic/level shouldn't
     // bias the adaptive gain of the next one.

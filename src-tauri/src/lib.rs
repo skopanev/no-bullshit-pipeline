@@ -249,13 +249,10 @@ pub fn run() {
                 }
             }
 
-            // Pre-warm the streaming sidecar so the first shortcut press
-            // doesn't pay the 1-3s model-load cost. Runs entirely in the
-            // background — failures are logged and the user just falls back
-            // to the inline spawn path on first press.
-            if settings.dictation.enabled {
-                dictation::schedule_warm_streaming(app.handle());
-            }
+            // Streaming pre-warm is disabled while streaming itself is off
+            // (Parakeet EOU is English-biased — batch TDT v3 handles
+            // multilingual speech far better). Flip back on once we have
+            // a comparable multilingual streaming model.
 
             Ok(())
         })
