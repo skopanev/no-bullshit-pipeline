@@ -5,7 +5,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -38,6 +38,11 @@ struct Session {
 /// Coefficient applied to the current system output volume during a session.
 /// 0.4 = duck to 40% of current.
 const VOLUME_DUCK_RATIO: f32 = 0.4;
+
+/// Adaptive level-meter state. Stores the running peak of (rms+peak) as
+/// f32 bits so push_level can normalize current frames against it without
+/// any device-specific gain constant. Reset at session start.
+static PEAK_TRACKER: AtomicU32 = AtomicU32::new(0);
 
 // SAFETY: cpal::Stream is !Send on macOS due to PhantomData<*mut ()>. The stream
 // is created, kept alive in the Mutex, and dropped on stop — never moved across
@@ -129,10 +134,23 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         }
         let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
         let rms = (sum_sq / samples.len() as f32).sqrt();
-        // Match the visualisation curve used by the main mic pipeline:
-        // sqrt-compressed so quiet speech still moves the meter visibly.
-        let scaled = (rms * 4.0).sqrt().min(1.0);
-        crate::mic_audio::set_audio_level(scaled);
+        let peak = samples.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+        let signal = rms * 0.6 + peak * 0.4;
+
+        // Adaptive gain: track a slowly-decaying running peak of the signal
+        // and normalize current frame to it. Far-field built-in mics and
+        // close BT headsets both end up filling most of the meter without
+        // any device-specific calibration.
+        const FLOOR: f32 = 0.005; // ignore room hiss / DC offset
+        const DECAY: f32 = 0.997; // ~95% retained over 1s of 20ms callbacks
+        let prev = f32::from_bits(PEAK_TRACKER.load(Ordering::Relaxed));
+        let new_max = (prev * DECAY).max(signal).max(FLOOR);
+        PEAK_TRACKER.store(new_max.to_bits(), Ordering::Relaxed);
+
+        let level = (signal / new_max).clamp(0.0, 1.0);
+        // Mild sqrt curve — small movements still feel visible without
+        // hovering at 100% on every plosive.
+        crate::mic_audio::set_audio_level(level.sqrt());
     }
 
     let stream = match config.sample_format() {
