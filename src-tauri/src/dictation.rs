@@ -33,6 +33,13 @@ struct Session {
     /// output device (so macOS doesn't auto-route and we can't hear ourselves
     /// over the music otherwise).
     pre_duck_volume: Option<u32>,
+    /// Live streaming bridge. `Some` only when the shortcut's engine supports
+    /// streaming (currently FluidAudio). When set, samples are forwarded to
+    /// the sidecar in the audio callback and the final transcript comes from
+    /// the sidecar's last NDJSON line on stop. When `None` we fall back to
+    /// the legacy batch path: accumulate into `samples`, write a tmp WAV at
+    /// stop, transcribe that.
+    streaming: Option<crate::dictation_streaming::StreamingSession>,
 }
 
 /// Coefficient applied to the current system output volume during a session.
@@ -95,7 +102,7 @@ fn find_shortcut(shortcut_id: &str) -> Option<DictationShortcut> {
         .find(|s| s.id == shortcut_id)
 }
 
-pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
+pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
     let state = app.state::<DictationState>();
     if state.is_active.load(Ordering::Relaxed) {
         return Err("Dictation already active".into());
@@ -121,6 +128,33 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         channels,
         config.sample_format()
     );
+
+    // Spawn the streaming sidecar BEFORE opening the cpal input stream — the
+    // sidecar blocks until its CoreML model loads (~1-3s on cold start), and
+    // we want zero samples to fall on the floor between cpal.play() and the
+    // sidecar being ready to consume them. Only do this for engines that
+    // ship a streaming sidecar; everything else stays on the batch path.
+    let streaming = if matches!(shortcut.engine, TranscriptionProvider::FluidAudio)
+        && matches!(shortcut.input_source, crate::config::DictationInputSource::Audio)
+    {
+        match crate::dictation_streaming::StreamingSession::start(
+            app,
+            shortcut.id.clone(),
+            sample_rate,
+            channels,
+        )
+        .await
+        {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!("dictation: streaming sidecar failed ({}); falling back to batch", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let streaming_tx = streaming.as_ref().map(|s| s.samples_tx.clone());
 
     // Fresh meter state per session — last shortcut's mic/level shouldn't
     // bias the adaptive gain of the next one.
@@ -161,12 +195,20 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         crate::mic_audio::set_audio_level(level);
     }
 
+    // When streaming is active, samples go straight to the sidecar — no need
+    // to also hoard them in `samples`. When streaming is None we still need
+    // the in-memory buffer for the batch fallback.
+    let streaming_tx_f32 = streaming_tx.clone();
+    let streaming_tx_i16 = streaming_tx.clone();
+    let streaming_tx_u16 = streaming_tx.clone();
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &_| {
                 push_level(data);
-                if let Ok(mut buf) = samples_cb.lock() {
+                if let Some(tx) = &streaming_tx_f32 {
+                    let _ = tx.send(data.to_vec());
+                } else if let Ok(mut buf) = samples_cb.lock() {
                     buf.extend_from_slice(data);
                 }
             },
@@ -178,7 +220,9 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
             move |data: &[i16], _: &_| {
                 let f: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
                 push_level(&f);
-                if let Ok(mut buf) = samples_cb.lock() {
+                if let Some(tx) = &streaming_tx_i16 {
+                    let _ = tx.send(f);
+                } else if let Ok(mut buf) = samples_cb.lock() {
                     buf.extend_from_slice(&f);
                 }
             },
@@ -193,7 +237,9 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
                     .map(|&s| (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))
                     .collect();
                 push_level(&f);
-                if let Ok(mut buf) = samples_cb.lock() {
+                if let Some(tx) = &streaming_tx_u16 {
+                    let _ = tx.send(f);
+                } else if let Ok(mut buf) = samples_cb.lock() {
                     buf.extend_from_slice(&f);
                 }
             },
@@ -255,6 +301,7 @@ pub fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), String> {
         channels,
         stream: Some(stream),
         pre_duck_volume,
+        streaming,
     };
 
     *state
@@ -309,7 +356,31 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
         restore_system_volume_to(orig);
     }
 
+    let shortcut = find_shortcut(&shortcut_id)
+        .ok_or_else(|| format!("Shortcut '{}' vanished mid-session", shortcut_id))?;
 
+    // Streaming path: close the sample channel, wait for the sidecar to
+    // flush + emit its final transcript. Bypasses the entire batch
+    // normalize/resample/transcribe pipeline.
+    if let Some(streaming) = session.streaming.take() {
+        emit_status(app, "transcribing", Some(&shortcut_id), Some("Finalizing live transcript".into()));
+        let t0 = std::time::Instant::now();
+        let final_text = streaming.finish().await?;
+        log::info!(
+            "dictation: streaming finish {:?} (chars={})",
+            t0.elapsed(),
+            final_text.len()
+        );
+        let trimmed = final_text.trim().to_string();
+        if trimmed.is_empty() {
+            emit_status(app, "idle", Some(&shortcut_id), Some("No speech detected".into()));
+            return Ok(String::new());
+        }
+        return process_and_deliver(app, &shortcut, trimmed).await;
+    }
+
+    // Batch fallback: legacy path that buffers all PCM in memory, then
+    // converts + transcribes after stop.
     let raw_samples = {
         let s = session
             .samples
@@ -322,9 +393,6 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
         emit_status(app, "idle", Some(&shortcut_id), Some("No audio captured".into()));
         return Ok(String::new());
     }
-
-    let shortcut = find_shortcut(&shortcut_id)
-        .ok_or_else(|| format!("Shortcut '{}' vanished mid-session", shortcut_id))?;
 
     let duration_secs =
         raw_samples.len() as f64 / (session.sample_rate as f64 * session.channels as f64);
@@ -557,6 +625,9 @@ pub fn cancel_inner(app: &AppHandle) {
     if let Some(orig) = session.pre_duck_volume {
         restore_system_volume_to(orig);
     }
+    if let Some(streaming) = session.streaming.take() {
+        streaming.cancel();
+    }
 
     log::info!("dictation: '{}' cancelled via Escape", session.shortcut_id);
     emit_status(
@@ -598,8 +669,8 @@ fn unregister_escape_cancel(app: &AppHandle) {
 }
 
 #[tauri::command]
-pub fn dictation_start(app: AppHandle, shortcut_id: String) -> Result<(), String> {
-    start_inner(&app, &shortcut_id)
+pub async fn dictation_start(app: AppHandle, shortcut_id: String) -> Result<(), String> {
+    start_inner(&app, &shortcut_id).await
 }
 
 #[tauri::command]
@@ -624,7 +695,7 @@ pub async fn dictation_toggle(
     if active {
         Ok(Some(stop_inner(&app).await?))
     } else {
-        start_inner(&app, &shortcut_id)?;
+        start_inner(&app, &shortcut_id).await?;
         Ok(None)
     }
 }

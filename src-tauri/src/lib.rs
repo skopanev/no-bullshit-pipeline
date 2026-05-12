@@ -55,6 +55,7 @@ pub mod local_llm;
 pub mod realtime_transcription;
 mod call_detector;
 mod dictation;
+mod dictation_streaming;
 use audio::AudioState;
 use transcription::TranscriptionState;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -465,7 +466,7 @@ pub fn reload_dictation_shortcuts(
                     let result = if active {
                         dictation::stop_inner(&app).await.map(|_| ())
                     } else {
-                        dictation::start_inner(&app, &sid)
+                        dictation::start_inner(&app, &sid).await
                     };
                     if let Err(e) = result {
                         log::warn!("dictation toggle for '{}' failed: {}", sid, e);
