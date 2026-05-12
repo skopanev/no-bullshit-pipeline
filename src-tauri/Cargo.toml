@@ -44,7 +44,6 @@ log = "0.4.29"
 reqwest = { version = "0.13", features = ["json", "blocking", "rustls", "stream", "multipart", "query", "form"] }
 futures-util = "0.3.32"
 tokio = { version = "1.50", features = ["fs", "io-util", "sync", "time", "process"] }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 rodio = { version = "0.21", features = ["vorbis"] }
 lazy_static = "1.5"
 serde_yaml = "0.9"
