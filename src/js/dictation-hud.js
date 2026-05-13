@@ -47,28 +47,38 @@ let hideTimer = null;
 // recording start. Populated on demand from the dictation_status payload.
 const hotkeyCache = new Map();
 
-function setMousePassthrough(enabled) {
-  // accept_first_mouse(true) on the HUD NSWindow means the OS sends mouse-
-  // downs to NBP even when the body is opacity:0 — that grabs focus from
-  // whatever app the user clicked. Toggle the system-level pass-through
-  // along with CSS hidden so an invisible HUD truly ignores clicks.
-  if (hud && typeof hud.setIgnoreCursorEvents === 'function') {
-    hud.setIgnoreCursorEvents(enabled).catch(() => {});
-  }
+// Belt + suspenders + duct tape for focus stealing:
+//   1. window.hide() / show()  — NSWindow off-screen entirely when idle
+//   2. set_hud_clickthrough     — NSWindow.ignoresMouseEvents (OS-level guard
+//                                 even if the window happens to be visible
+//                                 during a race or paint warmup)
+//   3. body.hidden CSS class    — pointer-events:none + opacity:0 in webview
+async function setHudActive(active) {
+  try {
+    invoke('set_hud_clickthrough', { clickthrough: !active }).catch(() => {});
+  } catch (_e) { /* ignore */ }
+  if (!hud) return;
+  try {
+    if (active) {
+      if (typeof hud.show === 'function') await hud.show();
+    } else {
+      if (typeof hud.hide === 'function') await hud.hide();
+    }
+  } catch (_e) { /* ignore */ }
 }
 
 function showHud() {
   clearTimeout(hideTimer);
   hideTimer = null;
   body.classList.remove('hidden');
-  setMousePassthrough(false);
+  setHudActive(true);
 }
 
 function scheduleHide(delayMs) {
   clearTimeout(hideTimer);
   hideTimer = setTimeout(() => {
     body.classList.add('hidden');
-    setMousePassthrough(true);
+    setHudActive(false);
   }, delayMs);
 }
 
@@ -320,10 +330,10 @@ async function onStatus(payload) {
   }
 }
 
-// Initial state: HUD body starts with class="hidden" so we must also tell
-// macOS to pass mouse events straight through. Otherwise the invisible
-// always-on-top NSWindow steals clicks on whatever the user pointed at.
-setMousePassthrough(true);
+// Initial state: HUD body starts with class="hidden". Also hide the NSWindow
+// and force clickthrough so even a brief webview-paint warmup at startup
+// can't grab focus from whatever the user is doing.
+setHudActive(false);
 
 listen('dictation_status', (event) => {
   try {

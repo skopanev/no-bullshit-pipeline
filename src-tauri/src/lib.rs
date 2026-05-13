@@ -398,6 +398,7 @@ pub fn run() {
             is_accessibility_granted,
             request_accessibility_permission,
             restart_app,
+            set_hud_clickthrough,
         ])
         .on_window_event(|window, event| {
             match event {
@@ -568,6 +569,33 @@ fn restart_app(app: tauri::AppHandle) {
     app.restart();
 }
 
+/// Toggle whether the dictation HUD NSWindow swallows mouse events.
+/// Called from dictation-hud.js: false when entering an interactive state
+/// (recording / accessibility-error with a button), true when idling out.
+/// This is the OS-level guard — even if the webview happens to be visible,
+/// NSWindow.ignoresMouseEvents=true means clicks pass straight through to
+/// whatever's behind, so no focus stealing.
+#[tauri::command]
+fn set_hud_clickthrough(app: tauri::AppHandle, clickthrough: bool) {
+    let Some(window) = app.get_webview_window("dictation-hud") else {
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        if let Ok(ns_window_ptr) = window.ns_window() {
+            let ns_window: *mut objc2::runtime::AnyObject =
+                ns_window_ptr as *mut objc2::runtime::AnyObject;
+            if !ns_window.is_null() {
+                let _: () = objc2::msg_send![ns_window, setIgnoresMouseEvents: clickthrough];
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window.set_ignore_cursor_events(clickthrough);
+    }
+}
+
 /// Reposition the HUD over the monitor that currently hosts the mouse cursor.
 /// macOS users with multiple displays expect dictation overlays to appear on
 /// the screen they're working on, not on the primary monitor by default.
@@ -680,6 +708,12 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
         // these flags neither CSS `-webkit-app-region: drag` nor JS
         // startDragging() actually moves the window. Flip them on directly via
         // the NSWindow handle.
+        //
+        // Also pin ignoresMouseEvents=true at build time so the HUD is born
+        // click-through. JS toggles it false only when entering active states
+        // (recording / error with an action button). This is the OS-level
+        // belt that backstops the CSS body.hidden / window.hide() path —
+        // if either layer races, the NSWindow itself still refuses clicks.
         #[cfg(target_os = "macos")]
         unsafe {
             if let Ok(ns_window_ptr) = window.ns_window() {
@@ -688,6 +722,7 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
                 if !ns_window.is_null() {
                     let _: () = objc2::msg_send![ns_window, setMovable: true];
                     let _: () = objc2::msg_send![ns_window, setMovableByWindowBackground: true];
+                    let _: () = objc2::msg_send![ns_window, setIgnoresMouseEvents: true];
                 }
             }
         }
