@@ -24,6 +24,15 @@ pub struct LlmModelInfo {
     pub size_mb: u64,
     pub params: String,
     pub downloaded: bool,
+    /// File exists on disk but its size doesn't match HF's reported size by
+    /// more than 1 MB. Usually means a download was killed mid-stream (dev
+    /// restart, force-quit). UI surfaces this state and offers Delete only.
+    pub broken: bool,
+    /// A `.gguf` lingering in the models dir that no longer matches anything
+    /// in the curated catalog. Happens when we bump the catalog to a newer
+    /// generation (Qwen3 → Qwen3.5). Rendered as a muted "removed from
+    /// catalog" card with Delete only, so users can reclaim disk on demand.
+    pub orphan: bool,
     pub path: String,
 }
 
@@ -31,48 +40,44 @@ struct ModelDef {
     id: &'static str,
     name: &'static str,
     desc: &'static str,
-    filename: &'static str,
     url: &'static str,
-    size_mb: u64,
     params: &'static str,
 }
 
+impl ModelDef {
+    /// Local filename is the last path segment of the HuggingFace URL — no
+    /// reason to repeat it as a separate field.
+    fn filename(&self) -> &'static str {
+        self.url.rsplit('/').next().unwrap_or(self.url)
+    }
+}
+
+// Curated for Quick Dictate text-enhancement: short prompt in, short prompt
+// out, mostly RU/EN. Anything English-only got dropped except a single
+// compact Llama for users who never type Russian. Refresh this list when a
+// new generation lands (Qwen → 3.x; Llama → 3.x) — there's no auto-update
+// from HuggingFace yet.
 const MODELS: &[ModelDef] = &[
     ModelDef {
-        id: "phi-3.5-mini",
-        name: "Phi-3.5 Mini",
-        desc: "Fast, lightweight. English only.",
-        filename: "Phi-3.5-mini-instruct-Q4_K_M.gguf",
-        url: "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf",
-        size_mb: 2400,
-        params: "3.8B",
+        id: "qwen3-4b",
+        name: "Qwen 3 4B",
+        desc: "RU/EN/ZH + 26 langs · fast",
+        url: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf",
+        params: "4B",
     },
     ModelDef {
-        id: "llama-3.1-8b",
-        name: "Llama 3.1 8B",
-        desc: "Strong all-rounder. English-first, basic multilingual.",
-        filename: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-        url: "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-        size_mb: 4920,
+        id: "qwen3-8b",
+        name: "Qwen 3 8B",
+        desc: "RU/EN/ZH + 26 langs · balanced",
+        url: "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
         params: "8B",
     },
     ModelDef {
-        id: "mistral-7b",
-        name: "Mistral 7B Instruct",
-        desc: "Great for structured output. English-first.",
-        filename: "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
-        url: "https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
-        size_mb: 4370,
-        params: "7B",
-    },
-    ModelDef {
-        id: "qwen2.5-7b",
-        name: "Qwen 2.5 7B",
-        desc: "Best multilingual — RU, EN, ZH, 29+ languages.",
-        filename: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        url: "https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        size_mb: 4680,
-        params: "7B",
+        id: "llama-3.2-3b",
+        name: "Llama 3.2 3B",
+        desc: "EN-first · fast",
+        url: "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        params: "3B",
     },
 ];
 
@@ -83,24 +88,135 @@ pub fn get_llm_models_info() -> Result<Vec<LlmModelInfo>, String> {
         std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
     }
 
-    Ok(MODELS
+    // Cached remote sizes in *bytes* — needed for byte-accurate corruption
+    // detection. `refresh_llm_model_sizes` keeps this fresh.
+    let cached_remote_bytes = read_remote_size_cache().unwrap_or_default();
+
+    let mut models: Vec<LlmModelInfo> = MODELS
         .iter()
         .map(|m| {
-            let local_path = models_dir.join(m.filename);
-            let downloaded = local_path.exists();
+            let local_path = models_dir.join(m.filename());
+            let file_exists = local_path.exists();
+            let local_bytes = if file_exists {
+                std::fs::metadata(&local_path).map(|md| md.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            let remote_bytes = cached_remote_bytes.get(m.id).copied();
+
+            // Broken = file present, remote size known, and they differ by
+            // more than 1 MB. Tolerance covers filesystem rounding / HF
+            // header inconsistencies without letting a half-finished
+            // multi-GB download masquerade as healthy.
+            const TOLERANCE: u64 = 1_048_576;
+            let broken = match (file_exists, remote_bytes) {
+                (true, Some(r)) => local_bytes.abs_diff(r) > TOLERANCE,
+                _ => false,
+            };
+
+            // "downloaded" should only be true for an intact file — broken
+            // shows up in the UI as a separate red state with Delete only.
+            let downloaded = file_exists && !broken;
+
+            let size_mb = if file_exists {
+                local_bytes / 1_048_576
+            } else {
+                remote_bytes.map(|b| b / 1_048_576).unwrap_or(0)
+            };
+
             LlmModelInfo {
                 id: m.id.to_string(),
                 name: m.name.to_string(),
                 desc: m.desc.to_string(),
-                filename: m.filename.to_string(),
+                filename: m.filename().to_string(),
                 url: m.url.to_string(),
-                size_mb: m.size_mb,
+                size_mb,
                 params: m.params.to_string(),
                 downloaded,
+                broken,
+                orphan: false,
                 path: local_path.to_string_lossy().to_string(),
             }
         })
-        .collect())
+        .collect();
+
+    // Append orphan entries — .gguf files lingering in the models dir that
+    // aren't in the current catalog (typically because we bumped to a newer
+    // model version). They render in the UI as muted cards with Delete only
+    // so users can reclaim disk space whenever they want.
+    let known: std::collections::HashSet<&str> =
+        MODELS.iter().map(|m| m.filename()).collect();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy().to_string();
+            if !name_str.ends_with(".gguf") {
+                continue;
+            }
+            if known.contains(name_str.as_str()) {
+                continue;
+            }
+            let path = entry.path();
+            let bytes = std::fs::metadata(&path).map(|md| md.len()).unwrap_or(0);
+            models.push(LlmModelInfo {
+                id: format!("orphan:{}", name_str),
+                name: name_str.trim_end_matches(".gguf").to_string(),
+                desc: "No longer in catalog — only delete to free disk".to_string(),
+                filename: name_str.clone(),
+                url: String::new(),
+                size_mb: bytes / 1_048_576,
+                params: "—".to_string(),
+                downloaded: false,
+                broken: false,
+                orphan: true,
+                path: path.to_string_lossy().to_string(),
+            });
+        }
+    }
+
+    Ok(models)
+}
+
+// ── Remote size cache ──────────────────────────────────────────────────────
+
+fn remote_size_cache_path() -> PathBuf {
+    get_llm_models_dir().join(".remote-sizes.json")
+}
+
+fn read_remote_size_cache() -> Option<HashMap<String, u64>> {
+    let raw = std::fs::read_to_string(remote_size_cache_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_remote_size_cache(map: &HashMap<String, u64>) {
+    if let Ok(raw) = serde_json::to_string_pretty(map) {
+        let _ = std::fs::write(remote_size_cache_path(), raw);
+    }
+}
+
+/// HEAD-probe every model in the catalog and persist the reported file size
+/// in **bytes** (needed for exact corruption detection — MB rounding would
+/// hide partial downloads). The frontend renders MB by dividing.
+/// Called from the frontend on first render; subsequent renders read
+/// straight from the cache so the network round-trip happens at most once
+/// per session.
+#[tauri::command]
+pub async fn refresh_llm_model_sizes() -> Result<HashMap<String, u64>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut sizes: HashMap<String, u64> = HashMap::new();
+    for m in MODELS {
+        if let Ok(meta) = fetch_remote_meta(&client, m.url).await {
+            if let Some(bytes) = meta.size_bytes {
+                sizes.insert(m.id.to_string(), bytes);
+            }
+        }
+    }
+    write_remote_size_cache(&sizes);
+    Ok(sizes)
 }
 
 // ── Download / Delete ───────────────────────────────────────────────────────
@@ -137,7 +253,16 @@ pub async fn download_llm_model(
         std::fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
     }
 
-    let file_path = models_dir.join(model_def.filename);
+    let file_path = models_dir.join(model_def.filename());
+
+    // Wipe any pre-existing file (partial, broken, or stale) so every
+    // Download click is a clean full pull. No magic resume — keeps the
+    // state machine simple and rules out corrupt-prefix landmines.
+    if file_path.exists() {
+        let _ = std::fs::remove_file(&file_path);
+    }
+    // Drop the cached sha alongside it so freshness check rebuilds.
+    let _ = std::fs::remove_file(sha256_sidecar_path(&file_path));
 
     let mut cancel_rx = DOWNLOAD_CANCEL_TX.subscribe();
 
@@ -146,17 +271,7 @@ pub async fn download_llm_model(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Check for partial download to resume
-    let existing_len = if file_path.exists() {
-        std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
-
-    let mut request = client.get(model_def.url);
-    if existing_len > 0 {
-        request = request.header("Range", format!("bytes={}-", existing_len));
-    }
+    let request = client.get(model_def.url);
 
     let res = tokio::select! {
         res = request.send() => res.map_err(|e| e.to_string())?,
@@ -169,29 +284,16 @@ pub async fn download_llm_model(
     };
 
     let status = res.status();
-    if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+    if !status.is_success() {
         return Err(format!("Download failed: HTTP {}", status));
     }
 
-    let (total_size, mut downloaded, resume) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-        let content_len = res.content_length().unwrap_or(0);
-        (existing_len + content_len, existing_len, true)
-    } else {
-        let content_len = res.content_length().unwrap_or(0);
-        (content_len, 0u64, false)
-    };
+    let total_size = res.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
 
-    let mut file = if resume {
-        tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(&file_path)
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        tokio::fs::File::create(&file_path)
-            .await
-            .map_err(|e| e.to_string())?
-    };
+    let mut file = tokio::fs::File::create(&file_path)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut stream = res.bytes_stream();
     let mut last_emit = Instant::now();
@@ -217,7 +319,9 @@ pub async fn download_llm_model(
         file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
 
-        if last_emit.elapsed().as_millis() > 200 || downloaded == total_size {
+        // ~30 Hz progress (33ms throttle) — the fill gradient looks ~6× more
+        // alive than at the old 5 Hz cadence.
+        if last_emit.elapsed().as_millis() > 33 || downloaded == total_size {
             let percent = if total_size > 0 {
                 (downloaded as f64 / total_size as f64) * 100.0
             } else {
@@ -247,16 +351,29 @@ pub async fn download_llm_model(
 
 #[tauri::command]
 pub fn delete_llm_model(model_id: String) -> Result<(), String> {
+    // Orphan ids have the shape `orphan:<filename>` — they aren't in the
+    // catalog by design, so we delete the file directly by filename.
+    if let Some(filename) = model_id.strip_prefix("orphan:") {
+        let file_path = get_llm_models_dir().join(filename);
+        if file_path.exists() {
+            std::fs::remove_file(&file_path).map_err(|e| e.to_string())?;
+        }
+        let sidecar = sha256_sidecar_path(&file_path);
+        if sidecar.exists() {
+            let _ = std::fs::remove_file(&sidecar);
+        }
+        return Ok(());
+    }
+
     let model_def = MODELS
         .iter()
         .find(|m| m.id == model_id)
         .ok_or_else(|| format!("Unknown model: {}", model_id))?;
 
-    let file_path = get_llm_models_dir().join(model_def.filename);
+    let file_path = get_llm_models_dir().join(model_def.filename());
     if file_path.exists() {
         std::fs::remove_file(&file_path).map_err(|e| e.to_string())?;
     }
-    // Remove SHA-256 sidecar if it exists
     let sidecar = sha256_sidecar_path(&file_path);
     if sidecar.exists() {
         let _ = std::fs::remove_file(&sidecar);
@@ -276,6 +393,19 @@ pub fn delete_llm_model(model_id: String) -> Result<(), String> {
 // ── Freshness Check ─────────────────────────────────────────────────────────
 
 fn sha256_sidecar_path(model_path: &PathBuf) -> PathBuf {
+    // Hide the sha sidecar with a leading `.` so it doesn't pollute the
+    // user's view in Finder next to the real model file.
+    let parent = model_path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let name = model_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    parent.join(format!(".{}.sha256", name))
+}
+
+/// Old sidecar name (`<file>.gguf.sha256`) — kept around to migrate / clean
+/// up any cache files that predate the dotfile move.
+fn legacy_sha256_sidecar_path(model_path: &PathBuf) -> PathBuf {
     model_path.with_extension("gguf.sha256")
 }
 
@@ -304,9 +434,19 @@ fn compute_and_cache_sha256(model_path: &PathBuf) -> Result<String, String> {
     Ok(hash)
 }
 
-/// Read cached SHA-256 from sidecar, or compute + cache if missing.
+/// Read cached SHA-256 from sidecar, or compute + cache if missing. Also
+/// migrates any pre-existing `<file>.gguf.sha256` (visible name) to the
+/// new `.<file>.gguf.sha256` dotfile so old caches don't sit forever next
+/// to the model in Finder.
 fn get_local_sha256(model_path: &PathBuf) -> Result<String, String> {
     let sidecar = sha256_sidecar_path(model_path);
+    let legacy = legacy_sha256_sidecar_path(model_path);
+    if legacy.exists() && !sidecar.exists() {
+        let _ = std::fs::rename(&legacy, &sidecar);
+    } else if legacy.exists() {
+        // Both exist — nuke the legacy copy, keep the dotfile.
+        let _ = std::fs::remove_file(&legacy);
+    }
     if sidecar.exists() {
         let cached = std::fs::read_to_string(&sidecar).map_err(|e| e.to_string())?;
         let cached = cached.trim().to_string();
@@ -317,25 +457,58 @@ fn get_local_sha256(model_path: &PathBuf) -> Result<String, String> {
     compute_and_cache_sha256(model_path)
 }
 
-/// Fetch the remote SHA-256 from HuggingFace via HEAD request ETag header.
-async fn fetch_remote_sha256(client: &reqwest::Client, url: &str) -> Result<String, String> {
-    let res = client.head(url).send().await.map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
+/// Result of a single HEAD probe against an HF LFS file. We get the real
+/// content sha (for staleness check) and file size (so the UI never has to
+/// guess at hardcoded MB values) from the same request.
+struct RemoteMeta {
+    sha256: String,
+    size_bytes: Option<u64>,
+}
+
+/// Fetch the remote SHA-256 + size from HuggingFace via HEAD request.
+///
+/// HF's LFS-backed downloads return a 302 to a signed CDN URL
+/// (`cas-bridge.xethub.hf.co` these days). The actual content sha256 ships
+/// as `x-linked-etag` on the 302 response — the CDN's own ETag is an S3
+/// hash that's unrelated to the file content. We can't let reqwest follow
+/// the redirect or the header is lost. `x-linked-size` carries the real
+/// content length on the same response.
+async fn fetch_remote_meta(_client: &reqwest::Client, url: &str) -> Result<RemoteMeta, String> {
+    let no_redirect_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let res = no_redirect_client.head(url).send().await.map_err(|e| e.to_string())?;
+    if !res.status().is_success() && !res.status().is_redirection() {
         return Err(format!("HEAD request failed: HTTP {}", res.status()));
     }
 
     let etag = res
         .headers()
-        .get("etag")
-        .or_else(|| res.headers().get("x-linked-etag"))
+        .get("x-linked-etag")
+        .or_else(|| res.headers().get("etag"))
         .ok_or("No ETag header in response")?
         .to_str()
         .map_err(|e| e.to_string())?;
-
-    // HuggingFace ETag format: "sha256:abc123..." or "\"abc123...\""
     let hash = etag.trim_matches('"');
-    let hash = hash.strip_prefix("sha256:").unwrap_or(hash);
-    Ok(hash.to_string())
+    let hash = hash.strip_prefix("sha256:").unwrap_or(hash).to_string();
+
+    let size_bytes = res
+        .headers()
+        .get("x-linked-size")
+        .or_else(|| res.headers().get("content-length"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    Ok(RemoteMeta { sha256: hash, size_bytes })
+}
+
+/// Back-compat helper for any caller that still only wants the sha.
+#[allow(dead_code)]
+async fn fetch_remote_sha256(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    fetch_remote_meta(client, url).await.map(|m| m.sha256)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -379,7 +552,7 @@ pub async fn check_all_llm_freshness(
 
     let downloaded: Vec<_> = MODELS
         .iter()
-        .filter(|m| models_dir.join(m.filename).exists())
+        .filter(|m| models_dir.join(m.filename()).exists())
         .collect();
     let total = downloaded.len();
 
@@ -393,7 +566,7 @@ pub async fn check_all_llm_freshness(
             return Err("cancelled".to_string());
         }
 
-        let local_path = models_dir.join(model_def.filename);
+        let local_path = models_dir.join(model_def.filename());
 
         let _ = app_handle.emit(
             "llm_freshness_progress",
@@ -477,7 +650,7 @@ fn resolve_model_path(model_id: &str) -> Result<PathBuf, String> {
         .find(|m| m.id == model_id)
         .ok_or_else(|| format!("Unknown model: {}", model_id))?;
 
-    let path = get_llm_models_dir().join(model_def.filename);
+    let path = get_llm_models_dir().join(model_def.filename());
     if !path.exists() {
         return Err(format!(
             "Model '{}' not downloaded. Download it in Settings first.",
@@ -487,8 +660,11 @@ fn resolve_model_path(model_id: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Run local LLM inference. Caches the loaded model between calls.
-pub fn run_inference(prompt: &str, max_tokens: u32) -> Result<String, String> {
+/// Run local LLM inference against the model id explicitly named by the
+/// caller. Caller is responsible for knowing which model to use — there's
+/// no global "active" / "default" selector anymore. Pipeline steps that use
+/// `provider: "local"` must specify `model` in their config.
+pub fn run_inference(model_id: &str, prompt: &str, max_tokens: u32) -> Result<String, String> {
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
@@ -497,13 +673,10 @@ pub fn run_inference(prompt: &str, max_tokens: u32) -> Result<String, String> {
     use llama_cpp_2::sampling::LlamaSampler;
     use std::num::NonZeroU32;
 
+    if model_id.is_empty() {
+        return Err("Local LLM step missing 'model' in pipeline config".into());
+    }
     let settings = load_settings();
-    let model_id = settings
-        .local_llm
-        .model_id
-        .as_deref()
-        .ok_or("No local LLM model selected. Configure in Settings.")?;
-
     let model_path = resolve_model_path(model_id)?;
     let gpu_layers = settings.local_llm.gpu_layers;
     let context_size = settings.local_llm.context_size;
@@ -629,7 +802,7 @@ pub fn run_inference(prompt: &str, max_tokens: u32) -> Result<String, String> {
 }
 
 /// Process text with a prompt using the local LLM (matches cloud_ai interface)
-pub fn process_with_local(prompt: &str, text: &str) -> Result<String, String> {
+pub fn process_with_local(model_id: &str, prompt: &str, text: &str) -> Result<String, String> {
     let full_prompt = if text.is_empty() {
         prompt.to_string()
     } else {
@@ -637,11 +810,11 @@ pub fn process_with_local(prompt: &str, text: &str) -> Result<String, String> {
     };
 
     // Estimate max output tokens: 4096 for typical processing tasks
-    run_inference(&full_prompt, 4096)
+    run_inference(model_id, &full_prompt, 4096)
 }
 
 /// Summarize text using the local LLM
-pub fn summarize_with_local(text: &str) -> Result<String, String> {
+pub fn summarize_with_local(model_id: &str, text: &str) -> Result<String, String> {
     let prompt = format!(
         "Create a concise summary of this transcript. Include:\n\
         - Main topics discussed\n\
@@ -650,7 +823,7 @@ pub fn summarize_with_local(text: &str) -> Result<String, String> {
         Transcript:\n{}",
         text
     );
-    run_inference(&prompt, 4096)
+    run_inference(model_id, &prompt, 4096)
 }
 
 // ── Model Freshness Check ──────────────────────────────────────────────────
@@ -701,7 +874,7 @@ async fn check_gguf_freshness() -> Vec<ModelFreshnessInfo> {
     let checks: Vec<_> = MODELS
         .iter()
         .filter_map(|model| {
-            let local_path = models_dir.join(model.filename);
+            let local_path = models_dir.join(model.filename());
             if !local_path.exists() {
                 return None;
             }

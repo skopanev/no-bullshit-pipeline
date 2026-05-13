@@ -614,7 +614,9 @@ async fn transcribe(
 ) -> Result<String, String> {
     match &shortcut.engine {
         TranscriptionProvider::FluidAudio => run_fluidaudio(app, &mono_16k).await,
-        TranscriptionProvider::AppleSpeech => run_apple_speech(app, &mono_16k).await,
+        TranscriptionProvider::AppleSpeech => {
+            run_apple_speech(app, &mono_16k, shortcut.language.as_deref()).await
+        }
         TranscriptionProvider::OpenAI => {
             let settings = load_settings();
             let api_key = get_api_key_for_provider(&settings, "openai")
@@ -632,10 +634,12 @@ async fn transcribe(
     }
 }
 
-/// Runs LLM-only steps of `pipeline_name` against `text` in memory.
-/// Non-LLM steps (Save/Webhook/Slack/Notion) are skipped silently. The output
-/// of the last successful LLM step is returned; if no LLM step ran, the
-/// original text is returned unchanged.
+/// Runs all text-transforming steps of `pipeline_name` against `text` in
+/// memory. Llm and CliAgent steps chain — their output replaces `current`.
+/// Delivery steps (Save/Webhook/Slack/Notion/Linear) are skipped with a
+/// debug log because they target filesystem/external services and don't
+/// fit a paste-only dictation flow. Mcp is also skipped for now — needs
+/// an inline executor wired in.
 async fn run_text_pipeline(text: &str, pipeline_name: &str) -> Result<String, String> {
     let pipelines = load_pipelines().map_err(|e| format!("load pipelines: {}", e))?;
     let pipeline = pipelines
@@ -644,27 +648,66 @@ async fn run_text_pipeline(text: &str, pipeline_name: &str) -> Result<String, St
         .clone();
 
     let mut current = text.to_string();
-    let mut ran_any_llm = false;
+    let mut ran_any_transform = false;
 
     for step in &pipeline.steps {
-        if step.connector != ConnectorType::Llm {
-            log::debug!(
-                "dictation pipeline '{}': skipping non-LLM step '{}'",
-                pipeline_name,
-                step.name
-            );
-            continue;
+        match &step.connector {
+            ConnectorType::Llm => {
+                let t = std::time::Instant::now();
+                log::info!(
+                    "dictation pipeline '{}': starting Llm step '{}' (input_chars={})",
+                    pipeline_name,
+                    step.name,
+                    current.len()
+                );
+                let out = crate::connectors::llm::execute_inline(&step.config, &current)
+                    .await
+                    .map_err(|e| format!("step '{}': {}", step.name, e))?;
+                log::info!(
+                    "dictation pipeline '{}': Llm step '{}' finished in {:?} (output_chars={})",
+                    pipeline_name,
+                    step.name,
+                    t.elapsed(),
+                    out.len()
+                );
+                current = out;
+                ran_any_transform = true;
+            }
+            ConnectorType::CliAgent => {
+                let t = std::time::Instant::now();
+                log::info!(
+                    "dictation pipeline '{}': starting CliAgent step '{}' (input_chars={})",
+                    pipeline_name,
+                    step.name,
+                    current.len()
+                );
+                let out = crate::connectors::cli_agent::execute_inline(&step.config, &current)
+                    .await
+                    .map_err(|e| format!("step '{}': {}", step.name, e))?;
+                log::info!(
+                    "dictation pipeline '{}': CliAgent step '{}' finished in {:?} (output_chars={})",
+                    pipeline_name,
+                    step.name,
+                    t.elapsed(),
+                    out.len()
+                );
+                current = out;
+                ran_any_transform = true;
+            }
+            other => {
+                log::debug!(
+                    "dictation pipeline '{}': skipping {:?} step '{}' (delivery/mcp not wired for dictation yet)",
+                    pipeline_name,
+                    other,
+                    step.name
+                );
+            }
         }
-        let out = crate::connectors::llm::execute_inline(&step.config, &current)
-            .await
-            .map_err(|e| format!("step '{}': {}", step.name, e))?;
-        current = out;
-        ran_any_llm = true;
     }
 
-    if !ran_any_llm {
+    if !ran_any_transform {
         log::warn!(
-            "dictation pipeline '{}' has no LLM steps; returning raw transcript",
+            "dictation pipeline '{}' has no Llm/CliAgent steps; returning raw transcript",
             pipeline_name
         );
     }
@@ -933,7 +976,11 @@ async fn run_fluidaudio(app: &AppHandle, samples_16k: &[f32]) -> Result<String, 
 /// Apple SpeechAnalyzer dictation path — mirrors run_fluidaudio but spawns the
 /// apple-speech-sidecar binary. Output JSON shape is identical (text + model)
 /// so the parser is shared.
-async fn run_apple_speech(app: &AppHandle, samples_16k: &[f32]) -> Result<String, String> {
+async fn run_apple_speech(
+    app: &AppHandle,
+    samples_16k: &[f32],
+    language: Option<&str>,
+) -> Result<String, String> {
     use tauri_plugin_shell::ShellExt;
 
     let tmp = std::env::temp_dir().join(format!(
@@ -942,11 +989,18 @@ async fn run_apple_speech(app: &AppHandle, samples_16k: &[f32]) -> Result<String
     ));
     write_mono_wav(&tmp, samples_16k, TARGET_RATE)?;
 
-    let (mut rx, _child) = app
+    let mut cmd = app
         .shell()
         .sidecar("apple-speech-sidecar")
         .map_err(|e| format!("sidecar create: {}", e))?
-        .arg(tmp.to_str().ok_or("invalid tmp path")?)
+        .arg(tmp.to_str().ok_or("invalid tmp path")?);
+    // Apple SpeechAnalyzer requires a Locale at init — no auto-detection.
+    // The sidecar falls back to `Locale.current` (= system locale) if no
+    // --lang is passed, which on an English-set Mac mangles Russian audio.
+    if let Some(lang) = language.filter(|s| !s.is_empty()) {
+        cmd = cmd.arg("--lang").arg(lang);
+    }
+    let (mut rx, _child) = cmd
         .spawn()
         .map_err(|e| format!("sidecar spawn: {}", e))?;
 

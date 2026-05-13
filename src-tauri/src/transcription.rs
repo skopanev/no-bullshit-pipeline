@@ -427,16 +427,14 @@ pub async fn summarize_recording(
             ).await?
         },
         "local" => {
-            let llm_settings = settings.local_llm.clone();
-            if llm_settings.enabled && llm_settings.model_id.is_some() {
-                tokio::task::spawn_blocking(move || {
-                    crate::local_llm::summarize_with_local(&transcript)
-                })
-                .await
-                .map_err(|e| format!("Local LLM task failed: {}", e))??
-            } else {
-                return Err("Local LLM not configured. Download a model in Settings.".to_string());
-            }
+            let model_id = settings.local_llm.model_id.clone().ok_or(
+                "Local LLM summary path requires `local_llm.model_id` in settings.json — set explicitly or remove the auto-summary trigger.",
+            )?;
+            tokio::task::spawn_blocking(move || {
+                crate::local_llm::summarize_with_local(&model_id, &transcript)
+            })
+            .await
+            .map_err(|e| format!("Local LLM task failed: {}", e))??
         },
         "ollama" => {
             cloud_ai::process_with_openai_compat(
@@ -504,18 +502,16 @@ pub async fn process_with_template(
             ).await?
         },
         "local" => {
-            let llm_settings = settings.local_llm.clone();
-            if llm_settings.enabled && llm_settings.model_id.is_some() {
-                let prompt = template.prompt.clone();
-                let transcript_clone = transcript.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::local_llm::process_with_local(&prompt, &transcript_clone)
-                })
-                .await
-                .map_err(|e| format!("Local LLM task failed: {}", e))??
-            } else {
-                return Err("Local LLM not configured. Download a model in Settings.".to_string());
-            }
+            let model_id = settings.local_llm.model_id.clone().ok_or(
+                "Local LLM template path requires `local_llm.model_id` in settings.json — set explicitly or move the template into a pipeline step.",
+            )?;
+            let prompt = template.prompt.clone();
+            let transcript_clone = transcript.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::local_llm::process_with_local(&model_id, &prompt, &transcript_clone)
+            })
+            .await
+            .map_err(|e| format!("Local LLM task failed: {}", e))??
         },
         "ollama" => {
             cloud_ai::process_with_openai_compat(

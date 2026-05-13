@@ -412,6 +412,60 @@ fn write_error(
 
 /// Process text with a CLI agent and return the output as a string.
 /// Used by summarize_recording / process_with_template when CliAgent provider is selected.
+/// Run a CLI-agent step purely in memory: take a config + input string,
+/// return the agent's stdout. Same role as `llm::execute_inline` — used by
+/// Quick Dictate to chain text-transforming pipeline steps without writing
+/// frontmatter files. Skips Mcp/working_directory/output_path features of
+/// the full `execute()` (those only matter for the file-based recording
+/// pipeline).
+pub async fn execute_inline(
+    config: &serde_json::Value,
+    input_text: &str,
+) -> Result<String, String> {
+    let cli = config
+        .get("cli")
+        .and_then(|v| v.as_str())
+        .ok_or("CLI agent config missing 'cli' (claude, codex, or opencode)")?;
+
+    let valid: Vec<&str> = SUPPORTED_CLIS.iter().map(|(id, _, _)| *id).collect();
+    if !valid.contains(&cli) {
+        return Err(format!(
+            "CLI agent 'cli' must be one of {:?}, got '{}'",
+            valid, cli
+        ));
+    }
+
+    let prompt = if let Some(template_name) = config
+        .get("prompt_template")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        crate::prompt_templates::get_prompt_template_internal(template_name)?
+            .prompt
+            .clone()
+    } else if let Some(inline) = config
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        inline.to_string()
+    } else {
+        return Err("CLI agent step missing 'prompt_template' or 'prompt'".into());
+    };
+
+    let timeout_secs = config
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(120);
+
+    let model = config
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+
+    process_with_cli(cli, &prompt, input_text, model, timeout_secs).await
+}
+
 pub async fn process_with_cli(
     cli: &str,
     prompt: &str,

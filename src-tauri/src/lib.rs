@@ -276,10 +276,7 @@ pub fn run() {
                 }
             }
 
-            // Streaming pre-warm is disabled while streaming itself is off
-            // (Parakeet EOU is English-biased — batch TDT v3 handles
-            // multilingual speech far better). Flip back on once we have
-            // a comparable multilingual streaming model.
+            // Streaming pre-warm is disabled while streaming itself is off.
 
             Ok(())
         })
@@ -374,6 +371,7 @@ pub fn run() {
             integrations::webhook::test_webhook_integration,
             // Local LLM
             local_llm::get_llm_models_info,
+            local_llm::refresh_llm_model_sizes,
             local_llm::download_llm_model,
             local_llm::cancel_llm_download,
             local_llm::delete_llm_model,
@@ -621,6 +619,11 @@ pub fn reposition_dictation_hud(app: &tauri::AppHandle) {
     let x = mx + (mw - hud_w) / 2.0;
     let y = my + mh * 0.12;
     let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    // First call after app launch — the window was built off-screen + hidden
+    // to dodge the transparent-WebView-paints-black startup flash. Reveal it
+    // now that we have a real on-screen target. Subsequent calls hit show()
+    // again as a no-op.
+    let _ = window.show();
 }
 
 fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -629,11 +632,11 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
         log::info!("dictation-hud: window already exists, skip");
         return Ok(());
     }
-    // The HUD stays `visible: true` at the window level — visibility is
-    // controlled by CSS on the body element. On macOS, a `visible: false` +
-    // transparent + .show() combo has triggered cases where the WebView never
-    // paints. Keeping it visible + transparent + 0-opacity body avoids that
-    // and gives instant show/hide via a single class toggle.
+    // HUD lifecycle: built hidden (visible=false) so its transparent WebView
+    // doesn't paint a black rectangle over whatever's on screen during the
+    // initial paint pass. `reposition_dictation_hud` is what positions and
+    // shows it on first dictation start; in-session show/hide is handled
+    // by the CSS `body.hidden` class toggle from JS.
     let mut builder = WebviewWindowBuilder::new(
         app,
         "dictation-hud",
@@ -647,10 +650,8 @@ fn build_dictation_hud(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error:
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
-    // Accept the very first click on the (initially un-focused) window so the
-    // user can grab and drag without an extra focus tap.
     .accept_first_mouse(true)
-    .visible(true)
+    .visible(false)
     .resizable(false)
     .shadow(false);
 

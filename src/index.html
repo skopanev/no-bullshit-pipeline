@@ -342,9 +342,9 @@
                       <span class="provider-key-status key-missing" id="cloud-provider-status" role="status" aria-label="API key not configured" style="display: none; flex-shrink: 0"></span>
                       <select id="settings-transcription-provider" class="settings-select">
                         <option value="FluidAudio">FluidAudio (on-device, recommended)</option>
-                        <option value="AppleSpeech" data-needs-apple-speech="1">Apple Speech (macOS 26+)</option>
-                        <option value="OpenAI">OpenAI Whisper API</option>
-                        <option value="Google">Google Gemini</option>
+                        <option value="AppleSpeech" data-needs-apple-speech="1">Apple Speech (on-device, macOS 26+)</option>
+                        <option value="OpenAI">OpenAI Whisper API (needs API key)</option>
+                        <option value="Google">Google Gemini (needs API key)</option>
                       </select>
                     </div>
                   </div>
@@ -518,8 +518,8 @@
                     <label>Transcriber</label>
                     <select id="dict-editor-engine" class="settings-select">
                       <option value="FluidAudio">FluidAudio (bundled, on-device)</option>
-                      <option value="AppleSpeech" data-needs-apple-speech="1">Apple Speech (macOS 26+)</option>
-                      <option value="OpenAI">OpenAI Whisper API</option>
+                      <option value="AppleSpeech" data-needs-apple-speech="1">Apple Speech (on-device)</option>
+                      <option value="OpenAI">OpenAI Whisper API (needs API key)</option>
                     </select>
                   </div>
                   <div class="editor-field">

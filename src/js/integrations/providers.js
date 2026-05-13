@@ -115,9 +115,6 @@ export function renderModelsProviders() {
         <button id="llm-check-freshness-btn" class="mini-action-btn" style="font-size:0.75rem;">Check for Updates</button>
         <span id="llm-freshness-status" style="font-size:0.7rem;color:var(--text-secondary);"></span>
       </div>
-      <p style="font-size:0.72rem;color:var(--text-secondary);opacity:0.7;margin:4px 0 0;">
-        Location: <span class="mono-font">~/.nbp/models/llm/</span>
-      </p>
     </div>
   `;
 
@@ -213,6 +210,13 @@ function wireFreshnessBtn(el) {
   if (!freshnessBtn) return;
   freshnessBtn.addEventListener('click', async () => {
     const statusEl = document.getElementById('llm-freshness-status');
+    // Bail out early if nothing is downloaded \u2014 otherwise the backend returns
+    // an empty report and we'd lie with "All up to date".
+    const anyDownloaded = (intState.llmModelsData || []).some(m => m.downloaded);
+    if (!anyDownloaded) {
+      if (statusEl) statusEl.textContent = 'Nothing to check \u2014 download a model first';
+      return;
+    }
     freshnessBtn.disabled = true;
     freshnessBtn.innerHTML = '<span class="btn-spinner"></span> Checking\u2026';
     freshnessCheckRunning = true;

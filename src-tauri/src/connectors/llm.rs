@@ -196,9 +196,17 @@ pub async fn execute_inline(
             cloud_ai::process_with_claude(&api_key, &prompt_to_send, "", &llm_config.model).await
         }
         "local" => {
+            // model_id MUST come from step config — no global default fallback.
+            let model_id = llm_config.model.clone();
+            if model_id.is_empty() {
+                return Err(
+                    "Local LLM step needs 'model' in pipeline config (e.g. \"qwen3-4b\")"
+                        .to_string(),
+                );
+            }
             let prompt_clone = prompt_to_send.clone();
             tokio::task::spawn_blocking(move || {
-                crate::local_llm::process_with_local(&prompt_clone, "")
+                crate::local_llm::process_with_local(&model_id, &prompt_clone, "")
             })
             .await
             .map_err(|e| format!("Local LLM task failed: {}", e))?
@@ -329,10 +337,16 @@ pub async fn execute(
             cloud_ai::process_with_claude(&api_key, &prompt_to_send, "", &llm_config.model).await
         }
         "local" => {
-            // Run local inference on a blocking thread (it's CPU/GPU bound)
+            let model_id = llm_config.model.clone();
+            if model_id.is_empty() {
+                return Err(
+                    "Local LLM step needs 'model' in pipeline config (e.g. \"qwen3-4b\")"
+                        .to_string(),
+                );
+            }
             let prompt_clone = prompt_to_send.clone();
             tokio::task::spawn_blocking(move || {
-                crate::local_llm::process_with_local(&prompt_clone, "")
+                crate::local_llm::process_with_local(&model_id, &prompt_clone, "")
             })
             .await
             .map_err(|e| format!("Local LLM task failed: {}", e))?
@@ -530,9 +544,16 @@ pub async fn execute_retry(
             cloud_ai::process_with_claude(&api_key, &corrective_prompt, "", &llm_config.model).await
         }
         "local" => {
+            let model_id = llm_config.model.clone();
+            if model_id.is_empty() {
+                return Err(
+                    "Local LLM step needs 'model' in pipeline config (e.g. \"qwen3-4b\")"
+                        .to_string(),
+                );
+            }
             let prompt_clone = corrective_prompt.clone();
             tokio::task::spawn_blocking(move || {
-                crate::local_llm::process_with_local(&prompt_clone, "")
+                crate::local_llm::process_with_local(&model_id, &prompt_clone, "")
             })
             .await
             .map_err(|e| format!("Local LLM task failed: {}", e))?

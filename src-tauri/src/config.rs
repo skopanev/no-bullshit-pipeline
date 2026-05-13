@@ -260,6 +260,11 @@ pub struct DictationShortcut {
     /// Mic device name override (None = system default)
     #[serde(default)]
     pub device_name: Option<String>,
+    /// BCP-47 language tag forwarded to engines that take one
+    /// (currently Apple Speech via `--lang`). None = use whatever the
+    /// engine defaults to (typically system locale).
+    #[serde(default)]
+    pub language: Option<String>,
     /// Optional pipeline name — when set, the transcript is passed through LLM-only steps
     /// of this pipeline; non-LLM steps (Save/Webhook/Slack/Notion) are skipped silently
     #[serde(default)]

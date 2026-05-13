@@ -13,9 +13,14 @@
     {
       "identifier": "opener:allow-open-path",
       "allow": [
-        {
-          "path": "$HOME/nbp-data/**"
-        }
+        { "path": "$HOME/nbp-data/**" },
+        { "path": "$HOME/.nbp/**" }
+      ]
+    },
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://huggingface.co/**" }
       ]
     },
     "notification:default",

@@ -1008,6 +1008,26 @@ body.detail-open .detail-view {
   background: var(--bg-input);
   border-color: var(--accent);
 }
+.mini-action-btn:active:not(:disabled) {
+  transform: scale(0.96);
+  filter: brightness(0.92);
+}
+.mini-action-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Force the buttons row above any sibling that might gain a compositing
+   layer from CSS animations (the progress-fill gradient is the suspect for
+   silently eating clicks on the Cancel button). */
+.provider-card .provider-card-input {
+  position: relative;
+  z-index: 2;
+}
+.provider-card .llm-progress-container {
+  position: relative;
+  z-index: 1;
+}
 
 .back-link-btn {
   background: transparent;
@@ -3883,9 +3903,177 @@ body.light .connections-group-header {
   min-height: 30px;
 }
 
+/* Cards for already-downloaded local LLM models get a subtle green wash so
+   you can tell at-a-glance which ones are ready to use without reading the
+   buttons. Light/dark have different bg defaults so we override both. */
+.provider-card.llm-downloaded,
+body.light .provider-card.llm-downloaded {
+  background: rgba(74, 222, 128, 0.04);
+  border-color: rgba(34, 197, 94, 0.22);
+}
+
+/* Broken / partial-download state — wash the whole card red so it's obvious
+   at a glance that this file shouldn't be used. Only action is Delete. */
+.provider-card.llm-broken,
+body.light .provider-card.llm-broken {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.45);
+}
+.llm-status-badge.llm-status-broken {
+  background: rgba(239, 68, 68, 0.16);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+/* Action buttons (Delete + Show in Finder) on downloaded/broken/orphan
+   cards stay hidden until the user hovers the card — keeps the row clean
+   in default state, action surface still one move away. Cancel + Download
+   are deliberately outside this group so they're always visible during
+   their respective states. */
+.llm-hover-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+.provider-card:hover .llm-hover-actions,
+.provider-card:focus-within .llm-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Orphan model files (not in the curated catalog anymore). Muted card,
+   visible but de-emphasised — the only action is Delete. */
+.provider-card.llm-orphan,
+body.light .provider-card.llm-orphan {
+  background: rgba(120, 120, 130, 0.05);
+  border-color: rgba(120, 120, 130, 0.25);
+  opacity: 0.78;
+}
+.llm-status-badge.llm-status-orphan {
+  background: rgba(120, 120, 130, 0.18);
+  color: var(--text-dim);
+  border: 1px solid rgba(120, 120, 130, 0.35);
+}
+
+/* Red flash when a download is cancelled — fades in then back out, then the
+   card re-renders to its post-cancel state. Buttons inside the card are
+   disabled by JS for the duration so the user can't fire another action
+   mid-animation. */
+.provider-card.llm-cancel-flash {
+  animation: llmCancelFlash 2100ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  pointer-events: none;
+}
+@keyframes llmCancelFlash {
+  0%   { background: transparent; border-color: rgba(239, 68, 68, 0); }
+  20%  { background: rgba(239, 68, 68, 0.16); border-color: rgba(239, 68, 68, 0.55); }
+  100% { background: transparent; border-color: rgba(239, 68, 68, 0); }
+}
+
+/* Hidden by default — only shown while a download is in flight (or just
+   finished, briefly). Showed up on every model card otherwise. */
+.llm-progress-container {
+  display: none;
+  width: 100%;
+  margin-top: 10px;
+  /* Force the bar onto its own row, full card width, regardless of how the
+     surrounding flex/wrap shakes out. */
+  flex-basis: 100%;
+}
+.llm-progress-container.visible {
+  display: block;
+}
+.llm-progress-track {
+  position: relative;
+  height: 10px;
+  background: rgba(120, 120, 130, 0.12);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.llm-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: 999px;
+  background:
+    /* Sheen: 60%-wide highlight stripe sliding across. Positions are picked
+       so at the start the stripe sits fully off-screen left, and at the end
+       fully off-screen right — no half-visible state on appearance. */
+    linear-gradient(
+      110deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.55) 50%,
+      transparent 100%
+    ) -150% 0 / 60% 100% no-repeat,
+    /* Base gradient — slow drift gives the bar a "live" feel. */
+    linear-gradient(90deg, var(--accent, #8b5cf6), #6366f1 50%, var(--accent, #8b5cf6));
+  background-size: 60% 100%, 200% 100%;
+  background-repeat: no-repeat;
+  /* Sheen total: 1.4s travel + 1s pause = 2.4s loop. Base gradient drifts
+     at its own slower pace; the two are intentionally not synced. */
+  animation: llmProgressGradient 3.6s linear infinite,
+             llmProgressSheen 2.4s linear infinite;
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.55);
+}
+@keyframes llmProgressGradient {
+  0%   { background-position: -150% 0, 0% 0; }
+  100% { background-position: -150% 0, 200% 0; }
+}
+@keyframes llmProgressSheen {
+  /* 0–58%   : sweep from fully off-left to fully off-right (1.4s)
+     58–100% : hold off-right, building a 1s breath before the next pass */
+  0%   { background-position: -150% 0, 0% 0; }
+  58%  { background-position: 250%  0, 0% 0; }
+  100% { background-position: 250%  0, 0% 0; }
+}
+.llm-progress-container.complete .llm-progress-fill {
+  animation: none;
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.45);
+}
+.llm-progress-container.error .llm-progress-fill {
+  animation: none;
+  background: linear-gradient(90deg, #ef4444, #b91c1c);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.45);
+}
+
 .llm-progress-text {
   min-height: 1.2em;
   white-space: nowrap;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 5px;
+  font-variant-numeric: tabular-nums;
+}
+.llm-progress-percent {
+  font-weight: 600;
+  color: var(--accent, #8b5cf6);
+}
+.llm-progress-container.complete .llm-progress-percent { color: #22c55e; }
+.llm-progress-container.error .llm-progress-percent { color: #ef4444; }
+
+.llm-hf-link {
+  color: var(--accent, #8b5cf6);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  font-size: 0.68rem;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+.llm-hf-link:hover {
+  text-decoration-style: solid;
+  filter: brightness(1.2);
+}
+.llm-card-sep {
+  opacity: 0.35;
+  margin: 0 6px;
+}
+.llm-card-size {
+  opacity: 0.6;
+  font-size: 0.68rem;
 }
 
 .provider-model-item {

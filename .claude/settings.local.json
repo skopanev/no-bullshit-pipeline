@@ -32,7 +32,10 @@
       "Bash(swift build *)",
       "Bash(GITLAB_HOST=git.otion.us glab ci list --repo healthium/hltm-workflows --status failed)",
       "Bash(./workflows/ntk-task/scripts/build-apps-json.sh)",
-      "Bash(bash -n workflows/ntk-task/scripts/prepare-workspace.sh)"
+      "Bash(bash -n workflows/ntk-task/scripts/prepare-workspace.sh)",
+      "Bash(curl -sI \"https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf\")",
+      "Bash(git worktree *)",
+      "Bash(git branch *)"
     ]
   }
 }

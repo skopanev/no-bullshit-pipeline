@@ -47,16 +47,28 @@ let hideTimer = null;
 // recording start. Populated on demand from the dictation_status payload.
 const hotkeyCache = new Map();
 
+function setMousePassthrough(enabled) {
+  // accept_first_mouse(true) on the HUD NSWindow means the OS sends mouse-
+  // downs to NBP even when the body is opacity:0 — that grabs focus from
+  // whatever app the user clicked. Toggle the system-level pass-through
+  // along with CSS hidden so an invisible HUD truly ignores clicks.
+  if (hud && typeof hud.setIgnoreCursorEvents === 'function') {
+    hud.setIgnoreCursorEvents(enabled).catch(() => {});
+  }
+}
+
 function showHud() {
   clearTimeout(hideTimer);
   hideTimer = null;
   body.classList.remove('hidden');
+  setMousePassthrough(false);
 }
 
 function scheduleHide(delayMs) {
   clearTimeout(hideTimer);
   hideTimer = setTimeout(() => {
     body.classList.add('hidden');
+    setMousePassthrough(true);
   }, delayMs);
 }
 
@@ -307,6 +319,11 @@ async function onStatus(payload) {
       break;
   }
 }
+
+// Initial state: HUD body starts with class="hidden" so we must also tell
+// macOS to pass mouse events straight through. Otherwise the invisible
+// always-on-top NSWindow steals clicks on whatever the user pointed at.
+setMousePassthrough(true);
 
 listen('dictation_status', (event) => {
   try {
