@@ -56,6 +56,7 @@ pub enum RealtimeTranscriptionProvider {
     #[default]
     Local,
     OpenAI,
+    AppleSpeech,
     #[serde(other)]
     Unknown,
 }
@@ -147,7 +148,10 @@ impl TranscriptionConfig {
     /// transcription. The "Real-time" UI toggle was removed; the provider
     /// choice alone determines the mode.
     pub fn realtime_supported(&self) -> bool {
-        matches!(self.provider, TranscriptionProvider::FluidAudio)
+        matches!(
+            self.provider,
+            TranscriptionProvider::FluidAudio | TranscriptionProvider::AppleSpeech
+        )
     }
 }
 

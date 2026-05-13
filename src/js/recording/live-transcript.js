@@ -22,8 +22,9 @@ export async function startLiveTranscript(recordingId) {
   const generation = ++liveTranscriptGeneration;
 
   // Live transcript is now driven by the provider — only providers that ship
-  // a streaming sidecar (currently FluidAudio) emit realtime_transcript_*.
-  if (state.appSettings?.transcription?.provider !== 'FluidAudio') return;
+  // a streaming sidecar (FluidAudio or AppleSpeech) emit realtime_transcript_*.
+  const provider = state.appSettings?.transcription?.provider;
+  if (provider !== 'FluidAudio' && provider !== 'AppleSpeech') return;
 
   const panel = document.getElementById('live-transcript-panel');
   if (panel) panel.style.display = '';
