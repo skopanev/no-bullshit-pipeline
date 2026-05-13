@@ -1,7 +1,7 @@
 {
   "name": "nbp",
   "private": true,
-  "version": "0.4.27",
+  "version": "0.4.29",
   "type": "module",
   "scripts": {
     "check": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
@@ -18,7 +18,7 @@
     "build": "bun run build:js && bun run build:sidecar && tauri build",
     "tauri": "tauri",
     "build:release": "./build.sh",
-    "clean": "rm -rf src-tauri/target src/dist fluidaudio-sidecar/.build src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin",
+    "clean": "rm -rf src-tauri/target src/dist fluidaudio-sidecar/.build apple-speech-sidecar/.build src-tauri/binaries/fluidaudio-sidecar-aarch64-apple-darwin src-tauri/binaries/apple-speech-sidecar-aarch64-apple-darwin",
     "update-packages": "rustup update && cargo update && bun update",
     "upgrade-packages": "cd src-tauri && cargo upgrade && cd .. && bun update",
     "bump": "node scripts/bump.mjs",
