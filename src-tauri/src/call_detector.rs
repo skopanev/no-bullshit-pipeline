@@ -47,14 +47,28 @@ fn send_un_notification(title: &str, body: &str) {
     };
 
     if !has_bundle {
-        // Debug fallback: use osascript for notifications
-        log::info!("send_un_notification: no app bundle, using osascript fallback");
-        let script = format!(
-            r#"display notification "{}" with title "{}""#,
-            body.replace('"', "\\\""),
-            title.replace('"', "\\\""),
-        );
-        let _ = Command::new("osascript").args(["-e", &script]).spawn();
+        // Debug builds have no .app bundle, so UNUserNotificationCenter is
+        // unavailable. Fall back to terminal-notifier (brew install
+        // terminal-notifier) — a proper .app bundle, so macOS reliably shows
+        // the notification. macOS blocks `--sender` spoofing from outside
+        // its own bundle, so we omit it; notification attributes to the
+        // parent terminal. In release builds the UNUserNotificationCenter
+        // path above runs and clicks land in the real nbp.app.
+        if Command::new("terminal-notifier")
+            .args([
+                "-title", title,
+                "-message", body,
+                "-sound", "default",
+                // Click activates the installed nbp.app (production bundle).
+                // Dev binary in target/debug isn't registered under this id,
+                // so in dev a click will launch the production build instead.
+                "-activate", "one.nbp.skk",
+            ])
+            .spawn()
+            .is_err()
+        {
+            log::warn!("notifications unavailable in dev: brew install terminal-notifier");
+        }
         return;
     }
 
