@@ -43,7 +43,7 @@ fn get_builtin_templates() -> HashMap<String, PromptTemplate> {
 Use EXACTLY this format (no top-level heading, start directly with ## Topic):
 
 ## Topic
-One sentence — what the conversation is about.
+A short title — 3 to 5 words — capturing what the conversation is about. No trailing period.
 
 ## Key Points
 - 3-7 bullet points, most important information discussed
@@ -80,7 +80,7 @@ For each task or discussion topic, capture the full context — not just the hea
 Use EXACTLY this format:
 
 ## Topic
-One sentence — what the conversation is about.
+A short title — 3 to 5 words — capturing what the conversation is about. No trailing period.
 
 ## Tasks
 
