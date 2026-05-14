@@ -57,6 +57,12 @@ async function setHudActive(active) {
   try {
     invoke('set_hud_clickthrough', { clickthrough: !active }).catch(() => {});
   } catch (_e) { /* ignore */ }
+  // When the HUD truly hides, release the global Esc hook so other apps get
+  // their Esc key back. Esc is re-registered automatically on the next
+  // recording start in Rust.
+  if (!active) {
+    try { invoke('dictation_release_esc').catch(() => {}); } catch (_e) { /* ignore */ }
+  }
   if (!hud) return;
   try {
     if (active) {

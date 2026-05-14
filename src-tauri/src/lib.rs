@@ -394,6 +394,7 @@ pub fn run() {
             dictation::dictation_cancel,
             dictation::dictation_reload_shortcuts,
             dictation::dictation_get_registration_status,
+            dictation::dictation_release_esc,
             open_accessibility_settings,
             is_accessibility_granted,
             request_accessibility_permission,
