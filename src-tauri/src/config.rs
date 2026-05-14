@@ -272,6 +272,10 @@ pub struct DictationShortcut {
     /// Auto-paste into the focused app via Cmd+V (true) or only copy to clipboard (false)
     #[serde(default = "default_true")]
     pub auto_paste: bool,
+    /// Capture system audio (loopback via Core Audio Process Taps) in addition to mic.
+    /// Useful for transcribing both sides of a call or dictating over playback.
+    #[serde(default)]
+    pub capture_system_audio: bool,
 }
 
 fn default_dictation_engine() -> TranscriptionProvider {

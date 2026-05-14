@@ -44,6 +44,10 @@ struct Session {
     /// the legacy batch path: accumulate into `samples`, write a tmp WAV at
     /// stop, transcribe that.
     streaming: Option<crate::dictation_streaming::StreamingSession>,
+    /// Concurrent system-audio (loopback) capture. Set only when the shortcut
+    /// has `capture_system_audio = true`. PCM lands in SYSTEM_BUFFER (48 kHz
+    /// stereo); pulled, mixed with mic, and fed to the transcriber on stop.
+    system_recorder: Option<crate::system_audio::SystemAudioRecorder>,
 }
 
 /// Coefficient applied to the current system output volume during a session.
@@ -361,6 +365,30 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // is unregistered as soon as the session ends (stop or cancel).
     register_escape_cancel(app);
 
+    // Optionally tap system audio in parallel. Loopback samples accumulate in
+    // SYSTEM_BUFFER and get mixed with the mic stream at stop time. We pass a
+    // throwaway path with `skip_file=true` so nothing gets written to disk.
+    let system_recorder = if shortcut.capture_system_audio {
+        crate::audio_processing::SYSTEM_BUFFER.clear();
+        let tmp_path = std::env::temp_dir().join(format!("nbp-dictation-sys-{}.ogg", shortcut.id));
+        match crate::system_audio::start_system_capture(tmp_path, true) {
+            Ok(rec) => {
+                log::info!("dictation: system audio capture started for '{}'", shortcut.name);
+                Some(rec)
+            }
+            Err(e) => {
+                log::warn!(
+                    "dictation: system audio capture failed for '{}': {} — falling back to mic-only",
+                    shortcut.name,
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let session = Session {
         shortcut_id: shortcut.id.clone(),
         samples,
@@ -369,6 +397,7 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
         stream: Some(stream),
         pre_duck_volume,
         streaming,
+        system_recorder,
     };
 
     *state
@@ -413,13 +442,22 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     };
 
     let shortcut_id = session.shortcut_id.clone();
-    unregister_escape_cancel(app);
+    // ESC stays registered through the pipeline so the user can dismiss the
+    // HUD at any time (transcribing/processing/pasting/error display). It's
+    // released at the natural end of stop_inner or by force_hide_hud.
 
     // Grace period: let the last ~250ms of audio reach the cpal callback
     // before we drop the stream. Otherwise the tail of the last word is
     // truncated because the OS audio queue hasn't flushed yet.
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     drop(session.stream.take());
+
+    // Stop the parallel system-audio tap (if any). Its `stop()` joins the
+    // capture thread, so by the time it returns SYSTEM_BUFFER holds the full
+    // loopback PCM at 48 kHz stereo for us to drain below.
+    if let Some(mut rec) = session.system_recorder.take() {
+        rec.stop();
+    }
 
     if let Some(orig) = session.pre_duck_volume {
         restore_system_volume_to(orig);
@@ -499,6 +537,15 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
         session.sample_rate == TARGET_RATE,
         mono_16k.len()
     );
+
+    // Optional system-audio mixdown. Drain SYSTEM_BUFFER (48 kHz stereo planar),
+    // average to mono, resample to 16 kHz, sum with mic with safe headroom so
+    // the loudest combined sample fits in [-1, 1] without clipping.
+    let mono_16k = if shortcut.capture_system_audio {
+        mix_in_system_audio(mono_16k)?
+    } else {
+        mono_16k
+    };
 
     let t3 = std::time::Instant::now();
     let transcript = transcribe(app, &shortcut, mono_16k).await?;
@@ -734,6 +781,9 @@ pub fn cancel_inner(app: &AppHandle) {
         None => return,
     };
     drop(session.stream.take());
+    if let Some(mut rec) = session.system_recorder.take() {
+        rec.stop();
+    }
     unregister_escape_cancel(app);
     if let Some(orig) = session.pre_duck_volume {
         restore_system_volume_to(orig);
@@ -764,7 +814,19 @@ fn register_escape_cancel(app: &AppHandle) {
                 }
                 let app = app_clone.clone();
                 tauri::async_runtime::spawn(async move {
-                    cancel_inner(&app);
+                    // If a session is in-flight: cancel mic + emit idle.
+                    // If only the post-pipeline HUD is lingering (error/done
+                    // state): just force-hide the window via emit_status so
+                    // the user can dismiss it instantly with Esc.
+                    let has_session = app
+                        .state::<DictationState>()
+                        .is_active
+                        .load(Ordering::Relaxed);
+                    if has_session {
+                        cancel_inner(&app);
+                    } else {
+                        force_hide_hud(&app);
+                    }
                 });
             });
         if let Err(e) = result {
@@ -773,12 +835,28 @@ fn register_escape_cancel(app: &AppHandle) {
     }
 }
 
+/// Force-hide the dictation HUD immediately — used by Esc when the user is
+/// staring at a stale error/done message and wants it gone. Sends an
+/// `idle` event with `Cancelled` so the JS hide path runs with 0ms delay.
+pub fn force_hide_hud(app: &AppHandle) {
+    emit_status(app, "idle", None, Some("Cancelled".into()));
+    unregister_escape_cancel(app);
+}
+
 fn unregister_escape_cancel(app: &AppHandle) {
     #[cfg(desktop)]
     {
         use tauri_plugin_global_shortcut::GlobalShortcutExt;
         let _ = app.global_shortcut().unregister("Escape");
     }
+}
+
+/// Called from JS when the HUD's CSS hide animation actually finishes — at
+/// that point Esc no longer has any HUD to dismiss, so we release the global
+/// hook (returning Esc to whatever app the user is in).
+#[tauri::command]
+pub fn dictation_release_esc(app: AppHandle) {
+    unregister_escape_cancel(&app);
 }
 
 #[tauri::command]
@@ -898,6 +976,43 @@ fn resample_mono(input: &[f32], src_rate: u32, dst_rate: u32) -> Result<Vec<f32>
     Ok(output)
 }
 
+/// Drain SYSTEM_BUFFER (48 kHz stereo planar), downmix to mono, resample to
+/// 16 kHz, and mix with `mic` sample-by-sample with safe headroom. Returns
+/// `mic` unchanged on failure or when no system audio was captured.
+fn mix_in_system_audio(mic: Vec<f32>) -> Result<Vec<f32>, String> {
+    const SYS_RATE: u32 = 48_000;
+    let buf = &crate::audio_processing::SYSTEM_BUFFER;
+    let frames = buf.available();
+    if frames == 0 {
+        log::info!("dictation: capture_system_audio=true but no loopback samples captured");
+        return Ok(mic);
+    }
+    let (left, right) = buf.pop(frames);
+    if left.is_empty() {
+        return Ok(mic);
+    }
+    let mono_48k: Vec<f32> = left
+        .iter()
+        .zip(right.iter())
+        .map(|(l, r)| 0.5 * (l + r))
+        .collect();
+    let sys_16k = resample_mono(&mono_48k, SYS_RATE, TARGET_RATE)?;
+    let len = mic.len().max(sys_16k.len());
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let m = mic.get(i).copied().unwrap_or(0.0);
+        let s = sys_16k.get(i).copied().unwrap_or(0.0);
+        out.push((0.7 * m + 0.5 * s).clamp(-1.0, 1.0));
+    }
+    log::info!(
+        "dictation: mixed in system audio — mic_len={}, sys_len={}, out_len={}",
+        mic.len(),
+        sys_16k.len(),
+        out.len()
+    );
+    Ok(out)
+}
+
 fn write_mono_wav(
     path: &std::path::Path,
     samples: &[f32],
@@ -935,11 +1050,15 @@ async fn run_fluidaudio(app: &AppHandle, samples_16k: &[f32]) -> Result<String, 
     ));
     write_mono_wav(&tmp, samples_16k, TARGET_RATE)?;
 
+    // Quick Dictate is single-speaker — skip diarization entirely. Saves the
+    // diarizer model download + load + process time, and dodges the
+    // "No speech detected" VAD failure on short/quiet clips.
     let (mut rx, _child) = app
         .shell()
         .sidecar("fluidaudio-sidecar")
         .map_err(|e| format!("sidecar create: {}", e))?
         .arg(tmp.to_str().ok_or("invalid tmp path")?)
+        .arg("--no-diarize")
         .spawn()
         .map_err(|e| format!("sidecar spawn: {}", e))?;
 

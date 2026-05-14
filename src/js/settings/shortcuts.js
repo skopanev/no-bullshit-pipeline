@@ -24,6 +24,8 @@ const engineSel = () => document.getElementById('dict-editor-engine');
 const engineField = () => document.getElementById('dict-editor-engine-field');
 const pipelineSel = () => document.getElementById('dict-editor-pipeline');
 const autoPasteCb = () => document.getElementById('dict-editor-auto-paste');
+const systemAudioCb = () => document.getElementById('dict-editor-system-audio');
+const systemAudioField = () => document.getElementById('dict-editor-system-audio-field');
 const axStatusBadge = () => document.getElementById('settings-ax-status-badge');
 const axStatusText = () => document.getElementById('settings-ax-status-text');
 const axGrantBtn = () => document.getElementById('settings-ax-grant-btn');
@@ -61,6 +63,7 @@ function emptyDraft() {
     device_name: null,
     pipeline: null,
     auto_paste: true,
+    capture_system_audio: false,
   };
 }
 
@@ -188,6 +191,8 @@ function syncInputSourceFields() {
   if (eField) eField.style.display = isAudio ? '' : 'none';
   const dField = deviceField();
   if (dField) dField.style.display = isAudio ? '' : 'none';
+  const sField = systemAudioField();
+  if (sField) sField.style.display = isAudio ? '' : 'none';
 }
 
 async function refreshAxStatus() {
@@ -262,6 +267,7 @@ async function openEditor(id) {
   inputSourceSel().value = data.input_source || 'Audio';
   engineSel().value = data.engine || 'FluidAudio';
   autoPasteCb().checked = data.auto_paste !== false;
+  systemAudioCb().checked = !!data.capture_system_audio;
   syncInputSourceFields();
   await populateDeviceDropdown(data.device_name);
   await populatePipelineDropdown(data.pipeline);
@@ -330,6 +336,7 @@ async function handleSave() {
     })(),
     pipeline: pipelineVal === '' ? null : pipelineVal,
     auto_paste: !!autoPasteCb().checked,
+    capture_system_audio: !!systemAudioCb().checked,
   };
 
   if (editingId) {
