@@ -96,9 +96,12 @@ function startLevelPolling() {
     try {
       const levels = await invoke('get_audio_levels');
       const mic = levels?.mic ?? 0;
-      // The Rust side already applies a sqrt-compressed curve (see
-      // dictation::push_level), so use mic directly with a small floor.
-      const base = Math.max(0.06, mic);
+      const sys = levels?.system ?? 0;
+      // Show whichever source is louder so the meter reacts to system audio
+      // (calls, video playback) when capture_system_audio is on, and to the
+      // mic the rest of the time. Both branches are already sqrt-compressed
+      // on the Rust side.
+      const base = Math.max(0.06, mic, sys);
       // Spread the base across N bars with a center-weighted bell curve and a
       // touch of jitter so the visualization feels alive even on steady tone.
       bars.forEach((bar, i) => {

@@ -211,6 +211,32 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
         config.sample_format()
     );
 
+    // Bring up the system-audio tap FIRST when requested. Creating the
+    // AggregateDevice + ProcessTap pokes Core Audio's engine, which can drop
+    // a freshly-played cpal mic stream's first callbacks (HUD meter then
+    // sits at zero even though samples arrive later). Starting it before
+    // the mic lets the engine settle once, then cpal layers on cleanly.
+    let system_recorder = if shortcut.capture_system_audio {
+        crate::audio_processing::SYSTEM_BUFFER.clear();
+        let tmp_path = std::env::temp_dir().join(format!("nbp-dictation-sys-{}.ogg", shortcut.id));
+        match crate::system_audio::start_system_capture(tmp_path, true) {
+            Ok(rec) => {
+                log::info!("dictation: system audio capture started for '{}'", shortcut.name);
+                Some(rec)
+            }
+            Err(e) => {
+                log::warn!(
+                    "dictation: system audio capture failed for '{}': {} — falling back to mic-only",
+                    shortcut.name,
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Streaming setup. Three tiers:
     //   1) Warm pool — sidecar pre-spawned at app startup, model already
     //      loaded. Instant: just claim it.
@@ -335,7 +361,13 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // (HFP decouples the slider from real playback level, ends up at zero).
     let input_name = device.name().ok();
     let output_name = host.default_output_device().and_then(|d| d.name().ok());
-    let pre_duck_volume = match (&input_name, &output_name) {
+    let pre_duck_volume = if shortcut.capture_system_audio {
+        // Don't duck — we're recording whatever is playing, so killing the
+        // output volume would also wipe the very signal the user wants
+        // captured (call, video, music).
+        log::info!("dictation: capture_system_audio=true — skipping output duck");
+        None
+    } else { match (&input_name, &output_name) {
         (Some(i), Some(o)) if i == o => {
             log::info!(
                 "dictation: input=output ({}) — letting macOS handle audio routing, skipping fade",
@@ -358,36 +390,12 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
             }
             snap
         }
-    };
+    } };
 
     // While dictation is live, hijack Escape to cancel the session — the user
     // can wave it off without their text leaking out as a paste. The shortcut
     // is unregistered as soon as the session ends (stop or cancel).
     register_escape_cancel(app);
-
-    // Optionally tap system audio in parallel. Loopback samples accumulate in
-    // SYSTEM_BUFFER and get mixed with the mic stream at stop time. We pass a
-    // throwaway path with `skip_file=true` so nothing gets written to disk.
-    let system_recorder = if shortcut.capture_system_audio {
-        crate::audio_processing::SYSTEM_BUFFER.clear();
-        let tmp_path = std::env::temp_dir().join(format!("nbp-dictation-sys-{}.ogg", shortcut.id));
-        match crate::system_audio::start_system_capture(tmp_path, true) {
-            Ok(rec) => {
-                log::info!("dictation: system audio capture started for '{}'", shortcut.name);
-                Some(rec)
-            }
-            Err(e) => {
-                log::warn!(
-                    "dictation: system audio capture failed for '{}': {} — falling back to mic-only",
-                    shortcut.name,
-                    e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     let session = Session {
         shortcut_id: shortcut.id.clone(),
