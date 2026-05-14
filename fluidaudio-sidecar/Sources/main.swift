@@ -29,15 +29,45 @@ func writeProgress(_ stage: String, _ percent: Int) {
 
 /// Check if FluidAudio models are already cached. With `requireDiarizer=false`
 /// only the ASR model needs to be present (Quick Dictate path).
+///
+/// We verify each specific file because FluidAudio's `downloadRepo` is
+/// all-or-nothing — one missing file triggers a full repo re-download
+/// (~2.8 GB for parakeet-coreml).
 func modelsAreCached(requireDiarizer: Bool = true) -> Bool {
     let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
     guard let modelsDir = appSupport?.appendingPathComponent("FluidAudio/Models") else { return false }
 
-    let asrModel = modelsDir.appendingPathComponent("parakeet-tdt-0.6b-v3-coreml")
-    guard FileManager.default.fileExists(atPath: asrModel.path) else { return false }
+    // FluidAudio 0.14.5 caches into `parakeet-tdt-0.6b-v3/`; older releases
+    // used `parakeet-tdt-0.6b-v3-coreml/`. Accept either.
+    let asrRequired = [
+        "Preprocessor.mlmodelc",
+        "Encoder.mlmodelc",          // .int8 default → ModelNames.ASR.encoderFile
+        "Decoder.mlmodelc",
+        "JointDecisionv3.mlmodelc",  // v3 jointV3File — added in FluidAudio 0.14.5
+    ]
+    let asrOk = ["parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-coreml"].contains { repo in
+        let dir = modelsDir.appendingPathComponent(repo)
+        return asrRequired.allSatisfy { name in
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path)
+        }
+    }
+    if !asrOk { return false }
     if !requireDiarizer { return true }
-    let diarModel = modelsDir.appendingPathComponent("speaker-diarization-coreml")
-    return FileManager.default.fileExists(atPath: diarModel.path)
+
+    // OfflineDiarizerManager files (batch mode) — distinct from the online
+    // DiarizerManager which uses pyannote_segmentation/wespeaker_v2.
+    let diarRequired = [
+        "Segmentation.mlmodelc",
+        "Embedding.mlmodelc",
+        "FBank.mlmodelc",
+        "PldaRho.mlmodelc",
+    ]
+    return ["speaker-diarization", "speaker-diarization-coreml"].contains { repo in
+        let dir = modelsDir.appendingPathComponent(repo)
+        return diarRequired.allSatisfy { name in
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path)
+        }
+    }
 }
 
 /// Join sub-word tokens into text, respecting word boundaries.
@@ -359,7 +389,12 @@ struct FluidAudioSidecar {
 
             if !cached { writeProgress("Downloading ASR model", 5) }
             let tDownload = CFAbsoluteTimeGetCurrent()
-            let asrModels = try await AsrModels.downloadAndLoad(version: .v3)
+            // When all required v3 files are present, skip FluidAudio's network probe.
+            // `downloadAndLoad` is all-or-nothing — one missing file re-downloads the
+            // whole 2.8 GB repo even if the rest is cached.
+            let asrModels = cached
+                ? try await AsrModels.loadFromCache(version: .v3)
+                : try await AsrModels.downloadAndLoad(version: .v3)
             tick("asrModels.downloadAndLoad", tDownload)
 
             let tInit = CFAbsoluteTimeGetCurrent()
@@ -452,6 +487,15 @@ struct FluidAudioSidecar {
             writeProgress("Complete", 100)
             FileHandle.standardOutput.write(json)
             FileHandle.standardOutput.write(Data("\n".utf8))
+
+            // Drain pipes before exit so Tauri's shell plugin gets a clean
+            // Terminated event. `exit(0)` is the C call — it doesn't await
+            // Swift cleanup, but it does flush stdio. We also explicitly
+            // close stdout/stderr to make Tauri see EOF on the read side
+            // before SIGCHLD arrives — otherwise `rx.recv().await` on the
+            // Rust side can hang indefinitely after a fast exit.
+            try? FileHandle.standardOutput.close()
+            try? FileHandle.standardError.close()
 
             // Skip the explicit `await asrManager.cleanup()` — it unloads the
             // 600MB CoreML model synchronously which delays process exit

@@ -480,7 +480,10 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     if let Some(streaming) = session.streaming.take() {
         emit_status(app, "transcribing", Some(&shortcut_id), Some("Finalizing live transcript".into()));
         let t0 = std::time::Instant::now();
-        let final_text = streaming.finish().await?;
+        let final_text = match streaming.finish().await {
+            Ok(t) => t,
+            Err(e) => return finish_with_error(app, &shortcut_id, "Transcription failed", e),
+        };
         log::info!(
             "dictation: streaming finish {:?} (chars={})",
             t0.elapsed(),
@@ -518,6 +521,9 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     );
     emit_status(app, "transcribing", Some(&shortcut_id), None);
 
+    // From here on, any error MUST end with an emit_status that takes the
+    // HUD out of "transcribing" — otherwise the HUD hangs and the user has
+    // to restart nbp. Use `finish_with_error` for every fallible step.
     log::info!(
         "dictation: pipeline start — raw_samples={}, channels={}, rate={}",
         raw_samples.len(),
@@ -537,7 +543,10 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     let mono_16k = if session.sample_rate == TARGET_RATE {
         mono
     } else {
-        resample_mono(&mono, session.sample_rate, TARGET_RATE)?
+        match resample_mono(&mono, session.sample_rate, TARGET_RATE) {
+            Ok(s) => s,
+            Err(e) => return finish_with_error(app, &shortcut_id, "Resample failed", e),
+        }
     };
     log::info!(
         "dictation: resample_mono {:?} (skipped={}, out_samples={})",
@@ -556,7 +565,10 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     };
 
     let t3 = std::time::Instant::now();
-    let transcript = transcribe(app, &shortcut, mono_16k).await?;
+    let transcript = match transcribe(app, &shortcut, mono_16k).await {
+        Ok(t) => t,
+        Err(e) => return finish_with_error(app, &shortcut_id, "Transcription failed", e),
+    };
     log::info!(
         "dictation: transcribe {:?} (engine={:?})",
         t3.elapsed(),
@@ -569,6 +581,26 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     }
 
     process_and_deliver(app, &shortcut, trimmed).await
+}
+
+/// Surface a fatal error to the HUD and return an Err. The HUD listens for
+/// non-"transcribing"/"recording" statuses to reset itself to idle, so we
+/// MUST emit one before bubbling — otherwise the HUD hangs on the previous
+/// state and the next hotkey press appears to do nothing.
+fn finish_with_error(
+    app: &AppHandle,
+    shortcut_id: &str,
+    summary: &str,
+    err: String,
+) -> Result<String, String> {
+    log::warn!("dictation: {summary} — {err}");
+    emit_status(
+        app,
+        "error",
+        Some(shortcut_id),
+        Some(format!("{summary}: {err}")),
+    );
+    Err(err)
 }
 
 /// Trigger flow for Clipboard-input shortcuts: snapshot the pasteboard, run
@@ -1092,6 +1124,13 @@ async fn run_fluidaudio(app: &AppHandle, samples_16k: &[f32]) -> Result<String, 
     let _ = std::fs::remove_file(&tmp);
 
     if exit_code != Some(0) {
+        // "No speech detected" isn't a failure — it's the sidecar's polite
+        // way of saying the audio was silent. Surface it as an empty
+        // transcript so stop_inner takes the normal idle-with-message path
+        // ("No speech detected" in the HUD) instead of error-with-stacktrace.
+        if stderr_buf.contains("No speech detected") {
+            return Ok(String::new());
+        }
         return Err(format!("FluidAudio sidecar failed: {}", stderr_buf));
     }
 
