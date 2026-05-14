@@ -27,16 +27,17 @@ func writeProgress(_ stage: String, _ percent: Int) {
     FileHandle.standardError.write(Data("PROGRESS:\(stage):\(percent)\n".utf8))
 }
 
-/// Check if FluidAudio models are already cached
-func modelsAreCached() -> Bool {
+/// Check if FluidAudio models are already cached. With `requireDiarizer=false`
+/// only the ASR model needs to be present (Quick Dictate path).
+func modelsAreCached(requireDiarizer: Bool = true) -> Bool {
     let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
     guard let modelsDir = appSupport?.appendingPathComponent("FluidAudio/Models") else { return false }
 
     let asrModel = modelsDir.appendingPathComponent("parakeet-tdt-0.6b-v3-coreml")
+    guard FileManager.default.fileExists(atPath: asrModel.path) else { return false }
+    if !requireDiarizer { return true }
     let diarModel = modelsDir.appendingPathComponent("speaker-diarization-coreml")
-
-    return FileManager.default.fileExists(atPath: asrModel.path) &&
-           FileManager.default.fileExists(atPath: diarModel.path)
+    return FileManager.default.fileExists(atPath: diarModel.path)
 }
 
 /// Join sub-word tokens into text, respecting word boundaries.
@@ -324,7 +325,7 @@ func runStreamMode() async {
 struct FluidAudioSidecar {
     static func main() async {
         guard CommandLine.arguments.count >= 2 else {
-            writeError("Usage: fluidaudio-sidecar <path-to-wav>  |  fluidaudio-sidecar --stream")
+            writeError("Usage: fluidaudio-sidecar <path-to-wav> [--no-diarize]  |  fluidaudio-sidecar --stream")
         }
 
         if CommandLine.arguments[1] == "--stream" {
@@ -332,7 +333,12 @@ struct FluidAudioSidecar {
             return
         }
 
-        let wavPath = CommandLine.arguments[1]
+        let args = CommandLine.arguments.dropFirst()
+        let noDiarize = args.contains("--no-diarize")
+        let wavPath = args.first(where: { !$0.hasPrefix("--") }) ?? ""
+        if wavPath.isEmpty {
+            writeError("Missing WAV path")
+        }
         let fileURL = URL(fileURLWithPath: wavPath)
 
         guard FileManager.default.fileExists(atPath: wavPath) else {
@@ -347,7 +353,7 @@ struct FluidAudioSidecar {
         }
 
         do {
-            let cached = modelsAreCached()
+            let cached = modelsAreCached(requireDiarizer: !noDiarize)
 
             writeProgress("Preparing models", 0)
 
@@ -363,17 +369,27 @@ struct FluidAudioSidecar {
             tick("asrManager.loadModels", tInit)
             writeProgress("Preparing models", 15)
 
-            if !cached { writeProgress("Downloading diarizer", 20) }
-            let tDiarInit = CFAbsoluteTimeGetCurrent()
-            var diarizerConfig = OfflineDiarizerConfig()
-            diarizerConfig.clusteringThreshold = 0.12
-            diarizerConfig.embeddingExcludeOverlap = false
-            diarizerConfig.minSegmentDuration = 0.1
-            diarizerConfig.minGapDuration = 0.3
-            diarizerConfig.clustering.minSpeakers = 2
-            let diarizerManager = OfflineDiarizerManager(config: diarizerConfig)
-            try await diarizerManager.prepareModels()
-            tick("diarizer.prepareModels", tDiarInit)
+            // Quick Dictate passes --no-diarize: single-speaker, only the
+            // transcript matters. Skips diarizer model download + load +
+            // process — saves several seconds and avoids the VAD throwing
+            // "No speech detected" on short/quiet clips.
+            let diarizerManager: OfflineDiarizerManager?
+            if noDiarize {
+                diarizerManager = nil
+            } else {
+                if !cached { writeProgress("Downloading diarizer", 20) }
+                let tDiarInit = CFAbsoluteTimeGetCurrent()
+                var diarizerConfig = OfflineDiarizerConfig()
+                diarizerConfig.clusteringThreshold = 0.12
+                diarizerConfig.embeddingExcludeOverlap = false
+                diarizerConfig.minSegmentDuration = 0.1
+                diarizerConfig.minGapDuration = 0.3
+                diarizerConfig.clustering.minSpeakers = 2
+                let mgr = OfflineDiarizerManager(config: diarizerConfig)
+                try await mgr.prepareModels()
+                diarizerManager = mgr
+                tick("diarizer.prepareModels", tDiarInit)
+            }
             writeProgress("Preparing models", 25)
 
             writeProgress("Transcribing", 25)
@@ -394,18 +410,32 @@ struct FluidAudioSidecar {
             progressTask.cancel()
             writeProgress("Transcribing", 60)
 
-            writeProgress("Diarization", 60)
-            let tDiarize = CFAbsoluteTimeGetCurrent()
-            let diarizationResult = try await diarizerManager.process(fileURL)
-            tick("diarizer.process", tDiarize)
-            writeProgress("Diarization", 90)
+            let diarizationSegments: [TimedSpeakerSegment]
+            if let diarizerManager {
+                writeProgress("Diarization", 60)
+                let tDiarize = CFAbsoluteTimeGetCurrent()
+                // Diarization VAD can reject quiet/short clips with
+                // "No speech detected in audio" — swallow the failure and
+                // ship the transcript with a single default speaker.
+                do {
+                    let diarizationResult = try await diarizerManager.process(fileURL)
+                    diarizationSegments = diarizationResult.segments
+                } catch {
+                    FileHandle.standardError.write(Data("diarization skipped: \(error)\n".utf8))
+                    diarizationSegments = []
+                }
+                tick("diarizer.process", tDiarize)
+                writeProgress("Diarization", 90)
+            } else {
+                diarizationSegments = []
+            }
 
             writeProgress("Finalizing", 90)
             let timings = asrResult.tokenTimings ?? []
             let (segments, speakerCount) = mergeAsrWithDiarization(
                 tokenTimings: timings,
                 fullText: asrResult.text,
-                diarizationSegments: diarizationResult.segments
+                diarizationSegments: diarizationSegments
             )
 
             let output = FluidAudioOutputJSON(
