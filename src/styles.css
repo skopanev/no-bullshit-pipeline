@@ -2743,6 +2743,34 @@ input:checked + .slider:before {
   color: var(--text-primary);
   opacity: 0.5;
 }
+.speaker-picker-hint {
+  padding: 6px 10px 2px;
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  opacity: 0.55;
+}
+.speaker-picker-listen {
+  display: flex;
+  gap: 6px;
+  padding: 2px 10px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.speaker-listen-btn {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.speaker-listen-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 
 .checkbox-group {
   display: flex;

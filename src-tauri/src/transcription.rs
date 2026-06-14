@@ -700,6 +700,57 @@ pub async fn get_speakers(recording_id: String) -> Result<Vec<SpeakerInfo>, Stri
     Ok(speakers)
 }
 
+/// A short voice sample of one speaker: a time range to play back so the user
+/// can recognize the voice before naming them.
+#[derive(Serialize)]
+pub struct SpeakerSample {
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+}
+
+/// Up to 3 of a speaker's longest turns (most voice = easiest to recognize),
+/// each capped to ~4 s so the preview is short. Empty when the recording has no
+/// diarized segments for that speaker.
+#[tauri::command]
+pub async fn get_speaker_samples(
+    recording_id: String,
+    speaker_id: String,
+) -> Result<Vec<SpeakerSample>, String> {
+    let json_path = get_data_dir().join(&recording_id).join("transcript.json");
+    if !json_path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&json_path)
+        .map_err(|e| format!("Failed to read transcript: {}", e))?;
+    let tj: TranscriptJson =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse transcript: {}", e))?;
+
+    let mut segs: Vec<&TranscriptSegment> = tj
+        .segments
+        .iter()
+        .filter(|s| s.speaker_id == speaker_id && !s.text.trim().is_empty())
+        .collect();
+    // Longest first.
+    segs.sort_by(|a, b| {
+        (b.end_time - b.start_time)
+            .partial_cmp(&(a.end_time - a.start_time))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(segs
+        .into_iter()
+        .take(3)
+        .map(|s| {
+            let end = s.end_time.min(s.start_time + 4.0);
+            SpeakerSample {
+                start_ms: (s.start_time * 1000.0).max(0.0) as u64,
+                end_ms: (end * 1000.0).max(0.0) as u64,
+                text: s.text.trim().chars().take(60).collect(),
+            }
+        })
+        .collect())
+}
+
 /// Rename one diarized speaker for a single recording. Stores the mapping in
 /// transcript.json's `speaker_names` (applied only at render) — never rewrites
 /// `text`/`segments`, so it's reversible and can't corrupt prose that happens

@@ -687,13 +687,21 @@ async function applySpeakerName(recordingId, speakerId, name) {
  * recording's calendar attendees, type a free-form name, or reset to the raw
  * "Speaker N" label. (macOS Contacts — with photos — can feed this list later.)
  */
-function openSpeakerPicker(chip, recordingId, speakerId) {
+async function openSpeakerPicker(chip, recordingId, speakerId) {
   if (activePickerClose) activePickerClose();
 
   const rec = state.allRecordings.find((r) => r.id === recordingId);
   const attendees = rec && Array.isArray(rec.attendees) ? rec.attendees : [];
   // Distinct attendee labels, in first-seen order.
   const people = [...new Set(attendees.map((a) => a.name || a.email).filter(Boolean))];
+
+  // Voice samples so the user can recognize who this is before naming them.
+  let samples = [];
+  try {
+    samples = await invoke('get_speaker_samples', { recordingId, speakerId });
+  } catch (err) {
+    console.error('get_speaker_samples failed:', err);
+  }
 
   const menu = document.createElement('div');
   menu.className = 'speaker-picker';
@@ -721,6 +729,36 @@ function openSpeakerPicker(chip, recordingId, speakerId) {
     b.addEventListener('click', onClick);
     menu.appendChild(b);
   };
+
+  // Voice-sample row: play a few of this speaker's turns to recognize them
+  // before assigning a name. Buttons don't close the picker.
+  if (samples && samples.length) {
+    const hint = document.createElement('div');
+    hint.className = 'speaker-picker-hint';
+    hint.textContent = '🔊 Whose voice is this?';
+    menu.appendChild(hint);
+    const row = document.createElement('div');
+    row.className = 'speaker-picker-listen';
+    samples.forEach((s, i) => {
+      const b = document.createElement('button');
+      b.className = 'speaker-listen-btn';
+      b.textContent = `▶ ${i + 1}`;
+      b.title = s.text || 'Play sample';
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        invoke('play_audio_segment', {
+          recordingId,
+          startMs: s.start_ms,
+          endMs: s.end_ms,
+        }).catch((err) => {
+          console.error('play_audio_segment failed:', err);
+          showToast('Failed to play sample: ' + err, 'error');
+        });
+      });
+      row.appendChild(b);
+    });
+    menu.appendChild(row);
+  }
 
   if (people.length) {
     for (const p of people) {

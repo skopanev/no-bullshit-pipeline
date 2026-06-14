@@ -155,6 +155,68 @@ fn run_playback(audio_path: std::path::PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// Play a single time range of a recording (a speaker "voice sample" preview).
+/// Fire-and-forget: stops any current playback/snippet first, but deliberately
+/// does NOT touch the main playback position/duration state, so the recording
+/// player UI isn't hijacked by a short preview clip.
+#[tauri::command]
+pub fn play_audio_segment(recording_id: String, start_ms: u64, end_ms: u64) -> Result<(), String> {
+    if end_ms <= start_ms {
+        return Err("Invalid segment range".to_string());
+    }
+    stop_audio()?;
+
+    let recording_dir = crate::storage::get_data_dir().join(&recording_id);
+    let mut audio_path = recording_dir.join("audio_mix.ogg");
+    if !audio_path.exists() {
+        audio_path = recording_dir.join("raw_mic.ogg");
+    }
+    if !audio_path.exists() {
+        return Err("Audio file not found".to_string());
+    }
+
+    STOP_SIGNAL.store(false, Ordering::SeqCst);
+    let len_ms = end_ms - start_ms;
+    let handle = thread::Builder::new()
+        .name("audio-snippet".to_string())
+        .spawn(move || {
+            if let Err(e) = run_segment_playback(audio_path, start_ms, len_ms) {
+                eprintln!("Snippet playback error: {}", e);
+            }
+        })
+        .map_err(|e| format!("Failed to spawn snippet thread: {}", e))?;
+    if let Ok(mut guard) = PLAYBACK_THREAD.lock() {
+        *guard = Some(handle);
+    }
+    Ok(())
+}
+
+fn run_segment_playback(
+    audio_path: std::path::PathBuf,
+    start_ms: u64,
+    len_ms: u64,
+) -> Result<(), String> {
+    use rodio::Source;
+    let stream_handle = rodio::DeviceSinkBuilder::open_default_sink()
+        .map_err(|e| format!("Audio output error: {}", e))?;
+    let sink = Player::connect_new(stream_handle.mixer());
+
+    let file = File::open(&audio_path).map_err(|e| format!("File error: {}", e))?;
+    let reader = BufReader::with_capacity(256 * 1024, file);
+    let source = Decoder::new(reader)
+        .map_err(|e| format!("Decode error: {}", e))?
+        .skip_duration(Duration::from_millis(start_ms))
+        .take_duration(Duration::from_millis(len_ms));
+
+    sink.append(source);
+    sink.play();
+    while !sink.empty() && !STOP_SIGNAL.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    sink.stop();
+    Ok(())
+}
+
 /// Pause audio playback
 #[tauri::command]
 pub fn pause_audio() -> Result<(), String> {
