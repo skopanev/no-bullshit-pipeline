@@ -1,0 +1,4 @@
+# Local eval clips — audio + seeded hints are not committed. The hand-labeled
+# .gt.tsv files are kept (commit them if you want the labels shared).
+*.wav
+*.hint.txt

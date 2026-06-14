@@ -725,10 +725,23 @@ struct FluidAudioSidecar {
         var translitMinLen = 4
         var langCode: String? = nil
         var noDiarize = false
+        // Diarizer config overrides for the DER eval harness (scripts/diar-eval),
+        // so a sweep can vary the config without recompiling. nil = use the
+        // hardcoded production value below.
+        var diarThreshold: Double? = nil
+        var diarExcludeOverlap: Bool? = nil
+        var diarNumSpeakers: Int? = nil
+        var diarMinSpeakers: Int? = nil
+        var diarMinSegDur: Double? = nil
         var ai = 1
         while ai < argv.count {
             switch argv[ai] {
             case "--no-diarize": noDiarize = true
+            case "--diar-threshold": if ai + 1 < argv.count { diarThreshold = Double(argv[ai + 1]); ai += 1 }
+            case "--diar-exclude-overlap": if ai + 1 < argv.count { diarExcludeOverlap = ["true", "1", "yes"].contains(argv[ai + 1].lowercased()); ai += 1 }
+            case "--diar-num-speakers": if ai + 1 < argv.count { diarNumSpeakers = Int(argv[ai + 1]); ai += 1 }
+            case "--diar-min-speakers": if ai + 1 < argv.count { diarMinSpeakers = Int(argv[ai + 1]); ai += 1 }
+            case "--diar-min-seg-dur": if ai + 1 < argv.count { diarMinSegDur = Double(argv[ai + 1]); ai += 1 }
             case "--engine": if ai + 1 < argv.count { engine = argv[ai + 1].lowercased(); ai += 1 }
             case "--variant": if ai + 1 < argv.count { variant = argv[ai + 1].lowercased(); ai += 1 }
             case "--vocab": if ai + 1 < argv.count { vocabPath = argv[ai + 1]; ai += 1 }
@@ -827,6 +840,12 @@ struct FluidAudioSidecar {
                 diarizerConfig.minSegmentDuration = 0.3
                 diarizerConfig.minGapDuration = 0.45
                 diarizerConfig.clustering.minSpeakers = 2
+                // DER-harness overrides (scripts/diar-eval) — vary config per run.
+                if let t = diarThreshold { diarizerConfig.clusteringThreshold = t }
+                if let e = diarExcludeOverlap { diarizerConfig.embeddingExcludeOverlap = e }
+                if let m = diarMinSegDur { diarizerConfig.minSegmentDuration = m }
+                if let ms = diarMinSpeakers { diarizerConfig.clustering.minSpeakers = ms }
+                if let n = diarNumSpeakers, n > 0 { diarizerConfig.clustering.numSpeakers = n }
                 let mgr = OfflineDiarizerManager(config: diarizerConfig)
                 try await mgr.prepareModels()
                 diarizerManager = mgr
