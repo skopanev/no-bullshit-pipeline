@@ -272,13 +272,59 @@ func mergeAsrWithDiarization(
         ))
     }
 
+    // Snap each whole word to ONE speaker. The loop above assigns every sub-word
+    // token independently by midpoint, so a word straddling a diarization
+    // boundary (e.g. " Здравству" | "й") gets torn across two speakers. Group
+    // tokens into words at the word-start marker — a leading space (Parakeet's
+    // tokenizer) or the ▁ SentencePiece marker — then give every token of a word
+    // the word's dominant-overlap speaker. (Matching the WRONG marker would lump
+    // the whole transcript into one giant "word" and collapse all speakers.)
+    func isWordStart(_ token: String) -> Bool {
+        token.first.map { $0.isWhitespace || $0 == "\u{2581}" } ?? false
+    }
+    var wordGroups: [[WordWithSpeaker]] = []
+    var wordBuf: [WordWithSpeaker] = []
+    for w in assignedWords {
+        if isWordStart(w.token) && !wordBuf.isEmpty {
+            wordGroups.append(wordBuf)
+            wordBuf = []
+        }
+        wordBuf.append(w)
+    }
+    if !wordBuf.isEmpty { wordGroups.append(wordBuf) }
+
+    var snappedWords: [WordWithSpeaker] = []
+    for group in wordGroups {
+        var counts: [String: Int] = [:]
+        for w in group { counts[w.speakerId, default: 0] += 1 }
+        // Dominant speaker by token count; ties resolve to the word's first
+        // token (iterate in order, switch only on strictly greater count).
+        var dominant = group[0].speakerId
+        var best = counts[dominant] ?? 0
+        for w in group {
+            let c = counts[w.speakerId] ?? 0
+            if c > best {
+                best = c
+                dominant = w.speakerId
+            }
+        }
+        for w in group {
+            snappedWords.append(WordWithSpeaker(
+                token: w.token,
+                startTime: w.startTime,
+                endTime: w.endTime,
+                speakerId: dominant
+            ))
+        }
+    }
+
     var segments: [SpeakerSegment] = []
     var currentSpeaker = ""
     var currentWords: [String] = []
     var segmentStart: Double = 0
     var segmentEnd: Double = 0
 
-    for word in assignedWords {
+    for word in snappedWords {
         if word.speakerId != currentSpeaker {
             if !currentWords.isEmpty {
                 segments.append(SpeakerSegment(

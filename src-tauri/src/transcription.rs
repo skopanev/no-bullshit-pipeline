@@ -421,7 +421,7 @@ async fn transcribe_recording_inner(
     // render a hint of what the call was about without re-reading the whole
     // transcript on every refresh. ~200 chars, broken at word boundary.
     let preview_text = render_transcript_from_json(&transcript_json);
-    let preview = preview_from_transcript(&transcript_json);
+    let preview = preview_from_rendered(&preview_text);
     if let Ok(mut meta) = crate::storage::read_metadata(&recording_id)
         && meta.transcript_preview.as_deref() != Some(preview.as_str())
     {
@@ -483,61 +483,74 @@ fn to_transcript_segments(segments: Vec<SidecarSegment>) -> Vec<TranscriptSegmen
         .collect()
 }
 
+/// Minimal HTML escape for a user-supplied speaker name. The rendered transcript
+/// is shown via Markdown → `innerHTML` on the frontend, which passes raw HTML
+/// through; a contact/free-text name like `<img onerror=…>` must not become an
+/// HTML sink. (Segment/transcript prose is unchanged — same path as before.)
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// Render display text from a TranscriptJson.
 ///
-/// - No segments (legacy transcripts, AppleSpeech, `--no-diarize`) → the flat
-///   `text` verbatim, exactly as before.
-/// - One distinct speaker → plain prose, no speaker headers (a lone "Speaker 1"
-///   turn from the no-diarize path shouldn't sprout a label).
-/// - Multiple speakers → `**Name:**` headers, where `Name` is the user rename
-///   from `speaker_names` if present, else the original id. Renames are applied
-///   here only; `segments`/`text` are never mutated.
+/// - No segments, or a single distinct speaker (legacy transcripts, AppleSpeech,
+///   `--no-diarize`, or a diarized run the model collapsed to one voice) → the
+///   flat `text` verbatim, byte-for-byte as before. Never rejoin segments here:
+///   `text` carries the sidecar's final wording (incl. translit/vocab rescoring)
+///   and exact spacing.
+/// - Multiple speakers → `**Name:**` headers, coalesced by the *displayed* name
+///   so two ids renamed to the same person read as one block. `Name` is the user
+///   rename from `speaker_names` (else the original id), HTML-escaped. Renames
+///   apply here only; `segments`/`text` are never mutated. Whitespace-only
+///   segments are dropped so they can't emit an empty header.
 pub(crate) fn render_transcript_from_json(tj: &TranscriptJson) -> String {
     if tj.segments.is_empty() {
         return tj.text.clone().unwrap_or_default();
     }
 
-    let distinct: HashSet<&str> = tj.segments.iter().map(|s| s.speaker_id.as_str()).collect();
+    let segs: Vec<(&str, &str)> = tj
+        .segments
+        .iter()
+        .filter_map(|s| {
+            let t = s.text.trim();
+            (!t.is_empty()).then_some((s.speaker_id.as_str(), t))
+        })
+        .collect();
+
+    let distinct: HashSet<&str> = segs.iter().map(|(id, _)| *id).collect();
     if distinct.len() <= 1 {
-        return tj
-            .segments
-            .iter()
-            .map(|s| s.text.trim())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        return tj.text.clone().unwrap_or_default();
     }
 
+    let display = |id: &str| -> String {
+        escape_html(tj.speaker_names.get(id).map(String::as_str).unwrap_or(id))
+    };
     let mut out = String::new();
-    let mut current = "";
-    for seg in &tj.segments {
-        if seg.speaker_id != current {
+    let mut current = String::new();
+    for (id, text) in &segs {
+        let name = display(id);
+        if name != current {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
-            let name = tj
-                .speaker_names
-                .get(&seg.speaker_id)
-                .map(String::as_str)
-                .unwrap_or(seg.speaker_id.as_str());
             out.push_str("**");
-            out.push_str(name);
+            out.push_str(&name);
             out.push_str(":**\n");
-            current = &seg.speaker_id;
+            current = name;
         }
-        let t = seg.text.trim();
-        if !t.is_empty() {
-            out.push_str(t);
-            out.push('\n');
-        }
+        out.push_str(text);
+        out.push('\n');
     }
     out.trim_end().to_string()
 }
 
-/// Recordings-list preview from a transcript: rendered text with the `**`
-/// speaker-header markers stripped so the list reads as plain prose.
-fn preview_from_transcript(tj: &TranscriptJson) -> String {
-    truncate_preview(&render_transcript_from_json(tj).replace("**", ""), 200)
+/// Recordings-list preview from already-rendered transcript text: strip the `**`
+/// speaker-header markers so the list reads as plain prose, then truncate.
+fn preview_from_rendered(rendered: &str) -> String {
+    truncate_preview(&rendered.replace("**", ""), 200)
 }
 
 /// Render transcript text on the fly from transcript.json (with .md fallback)
@@ -710,9 +723,10 @@ pub async fn rename_speaker(
     std::fs::rename(&temp_path, &json_path)
         .map_err(|e| format!("Failed to finalize transcript: {}", e))?;
 
+    let rendered = render_transcript_from_json(&tj);
     // Keep the recordings-list preview in sync with the new name.
     if let Ok(mut meta) = crate::storage::read_metadata(&recording_id) {
-        let preview = preview_from_transcript(&tj);
+        let preview = preview_from_rendered(&rendered);
         meta.transcript_preview = if preview.is_empty() {
             None
         } else {
@@ -721,7 +735,7 @@ pub async fn rename_speaker(
         let _ = crate::storage::write_metadata(&meta);
     }
 
-    Ok(render_transcript_from_json(&tj))
+    Ok(rendered)
 }
 
 pub fn convert_ogg_to_wav(
@@ -853,11 +867,12 @@ mod tests {
     }
 
     #[test]
-    fn single_speaker_has_no_headers() {
-        // The --no-diarize path emits one "Speaker 1" segment; it must read as
-        // plain prose, not sprout a header.
+    fn single_speaker_returns_flat_text_not_rejoined_segments() {
+        // One distinct speaker must return the verbatim `text` (which carries
+        // the sidecar's final wording + spacing), NOT segments rejoined with " ".
+        // `text` is deliberately different from the segment texts to prove it.
         let t = tj(
-            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"a b",
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"a, verbatim b!",
             "segments":[
               {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"a"},
               {"speaker_id":"Speaker 1","start_time":1.0,"end_time":2.0,"text":"b"}
@@ -868,7 +883,57 @@ mod tests {
             !r.contains("**"),
             "single speaker must have no headers: {r:?}"
         );
-        assert_eq!(r, "a b");
+        assert_eq!(r, "a, verbatim b!");
+    }
+
+    #[test]
+    fn whitespace_segment_emits_no_empty_header() {
+        // A whitespace-only turn must be dropped, not produce a dangling header.
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"flat",
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"   "},
+              {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"hello"}
+            ]}"#,
+        );
+        let r = render_transcript_from_json(&t);
+        // Only one speaker has real text → single-speaker → flat text, no headers.
+        assert_eq!(r, "flat");
+    }
+
+    #[test]
+    fn same_display_name_coalesces() {
+        // Two ids renamed to the same person read as ONE block (merge by name).
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"flat",
+            "speaker_names":{"Speaker 1":"Alex","Speaker 2":"Alex"},
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"hi"},
+              {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
+            ]}"#,
+        );
+        let r = render_transcript_from_json(&t);
+        assert_eq!(
+            r.matches("**Alex:**").count(),
+            1,
+            "one coalesced header: {r}"
+        );
+    }
+
+    #[test]
+    fn name_is_html_escaped() {
+        // A malicious contact/free-text name can't become an HTML sink.
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"flat",
+            "speaker_names":{"Speaker 1":"<img onerror=x>"},
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"hi"},
+              {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
+            ]}"#,
+        );
+        let r = render_transcript_from_json(&t);
+        assert!(!r.contains("<img"), "raw HTML must be escaped: {r}");
+        assert!(r.contains("&lt;img"));
     }
 
     #[test]
@@ -915,7 +980,7 @@ mod tests {
               {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
             ]}"#,
         );
-        let p = preview_from_transcript(&t);
+        let p = preview_from_rendered(&render_transcript_from_json(&t));
         assert!(!p.contains("**"), "preview must read as plain prose: {p:?}");
         assert!(p.contains("Speaker 1") && p.contains("hi"));
     }
@@ -957,11 +1022,9 @@ mod tests {
             }
             checked += 1;
         }
+        // No hard assert on count: a present-but-empty data dir (fresh machine)
+        // is a legit "nothing to verify", not a failure.
         eprintln!("real_recordings: verified {checked} transcript.json files");
-        assert!(
-            checked > 0,
-            "expected at least one real transcript to verify"
-        );
     }
 
     /// End-to-end over a REAL sidecar run: point `NBP_SIDECAR_JSON` at a captured

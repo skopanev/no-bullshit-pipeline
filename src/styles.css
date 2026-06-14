@@ -2707,6 +2707,43 @@ input:checked + .slider:before {
   background: var(--accent-soft);
 }
 
+/* Floating contact picker opened from a speaker chip */
+.speaker-picker {
+  position: fixed;
+  z-index: 1000;
+  min-width: 170px;
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+.speaker-picker-item {
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.speaker-picker-item:hover {
+  background: var(--accent-soft);
+}
+.speaker-picker-empty {
+  padding: 7px 10px;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  opacity: 0.5;
+}
+
 .checkbox-group {
   display: flex;
   align-items: center;

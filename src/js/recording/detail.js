@@ -49,6 +49,7 @@ export function clearTranscriptionTimer() {
 export function hideDetailView() {
   setSelectedRecordingId(null);
   stopProcessingPoll();
+  clearSpeakerBar();
   updateMainButton();
   ViewManager.showRecordings();
   cleanupPipelineProgress();
@@ -604,9 +605,10 @@ listen('transcription_progress', (event) => {
   }
 });
 
-/** Remove the speaker rename bar if one is shown. */
+/** Remove any speaker rename bar(s) and the floating contact picker. */
 function clearSpeakerBar() {
-  document.getElementById('speaker-bar')?.remove();
+  document.querySelectorAll('.speaker-bar').forEach((el) => el.remove());
+  document.querySelector('.speaker-picker')?.remove();
 }
 
 /**
@@ -616,10 +618,6 @@ function clearSpeakerBar() {
  * reversible. Re-renders the transcript and refreshes the list preview on rename.
  */
 async function renderSpeakerBar(recordingId) {
-  const transcriptEl = document.getElementById('transcript-content');
-  if (!transcriptEl) return;
-  clearSpeakerBar();
-
   let speakers = [];
   try {
     speakers = await invoke('get_speakers', { recordingId });
@@ -627,41 +625,132 @@ async function renderSpeakerBar(recordingId) {
     console.error('get_speakers failed:', err);
     return;
   }
+  // The user may have navigated to another recording while we awaited — the
+  // detail DOM now belongs to a different one. Bail rather than paint into it.
+  if (state.selectedRecordingId !== recordingId) return;
+  const transcriptEl = document.getElementById('transcript-content');
+  if (!transcriptEl || !transcriptEl.parentNode) return;
+
+  // Clear right before inserting so concurrent calls can't stack bars.
+  clearSpeakerBar();
   // Only worth a rename bar when diarization actually split >1 speaker.
   if (!speakers || speakers.length < 2) return;
 
   const bar = document.createElement('div');
-  bar.id = 'speaker-bar';
   bar.className = 'speaker-bar';
-  bar.innerHTML =
-    '<span class="speaker-bar-label">Speakers</span>' +
-    speakers
-      .map((s) => {
-        const name = s.display_name || s.speaker_id;
-        return `<button class="speaker-chip" data-speaker="${escapeHtml(s.speaker_id)}" title="Rename speaker">${escapeHtml(name)}</button>`;
-      })
-      .join('');
-  transcriptEl.parentNode.insertBefore(bar, transcriptEl);
-
-  bar.querySelectorAll('.speaker-chip').forEach((chip) => {
-    chip.addEventListener('click', async () => {
-      const speakerId = chip.dataset.speaker;
-      const newName = prompt(`Rename "${speakerId}" to:`, chip.textContent);
-      if (newName === null) return;
-      try {
-        const rendered = await invoke('rename_speaker', {
-          recordingId,
-          speakerId,
-          displayName: newName.trim(),
-        });
-        const el = document.getElementById('transcript-content');
-        if (el) applyMarkdownRendering(el, rendered);
-        await renderSpeakerBar(recordingId);
-        loadRecordings();
-      } catch (err) {
-        console.error('rename_speaker failed:', err);
-        showToast('Failed to rename speaker: ' + err, 'error');
-      }
+  const label = document.createElement('span');
+  label.className = 'speaker-bar-label';
+  label.textContent = 'Speakers';
+  bar.appendChild(label);
+  // DOM nodes + textContent (never innerHTML) so a display name can't inject.
+  for (const s of speakers) {
+    const chip = document.createElement('button');
+    chip.className = 'speaker-chip';
+    chip.title = 'Rename speaker';
+    chip.textContent = s.display_name || s.speaker_id;
+    chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openSpeakerPicker(chip, recordingId, s.speaker_id);
     });
+    bar.appendChild(chip);
+  }
+  transcriptEl.parentNode.insertBefore(bar, transcriptEl);
+}
+
+/** Assign `name` (a real person / contact, or empty to reset) to a speaker. */
+async function applySpeakerName(recordingId, speakerId, name) {
+  try {
+    const rendered = await invoke('rename_speaker', {
+      recordingId,
+      speakerId,
+      displayName: name,
+    });
+    // Only touch the transcript DOM if we're still on this recording.
+    if (state.selectedRecordingId === recordingId) {
+      const el = document.getElementById('transcript-content');
+      if (el) applyMarkdownRendering(el, rendered);
+      await renderSpeakerBar(recordingId);
+    }
+    loadRecordings();
+  } catch (err) {
+    console.error('rename_speaker failed:', err);
+    showToast('Failed to rename speaker: ' + err, 'error');
+  }
+}
+
+/**
+ * Open a small picker under a speaker chip: pick a real person from the
+ * recording's calendar attendees, type a free-form name, or reset to the raw
+ * "Speaker N" label. (macOS Contacts — with photos — can feed this list later.)
+ */
+function openSpeakerPicker(chip, recordingId, speakerId) {
+  document.querySelector('.speaker-picker')?.remove();
+
+  const rec = state.allRecordings.find((r) => r.id === recordingId);
+  const attendees = rec && Array.isArray(rec.attendees) ? rec.attendees : [];
+  // Distinct attendee labels, in first-seen order.
+  const people = [...new Set(attendees.map((a) => a.name || a.email).filter(Boolean))];
+
+  const menu = document.createElement('div');
+  menu.className = 'speaker-picker';
+
+  function close() {
+    menu.remove();
+    document.removeEventListener('click', onDoc, true);
+    document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('scroll', close, true);
+  }
+  function onDoc(e) {
+    if (!menu.contains(e.target)) close();
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') close();
+  }
+
+  // Build items as DOM nodes (textContent) so a name can't inject markup.
+  const addItem = (text, extraClass, onClick) => {
+    const b = document.createElement('button');
+    b.className = 'speaker-picker-item' + (extraClass ? ' ' + extraClass : '');
+    b.textContent = text;
+    b.addEventListener('click', onClick);
+    menu.appendChild(b);
+  };
+
+  if (people.length) {
+    for (const p of people) {
+      addItem(p, '', () => {
+        close();
+        applySpeakerName(recordingId, speakerId, p);
+      });
+    }
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'speaker-picker-empty';
+    empty.textContent = 'No calendar attendees';
+    menu.appendChild(empty);
+  }
+  addItem('✎ Type a name…', 'speaker-picker-custom', () => {
+    close();
+    const name = prompt(`Name for "${speakerId}":`, chip.textContent);
+    if (name !== null) applySpeakerName(recordingId, speakerId, name.trim());
   });
+  addItem(`↺ Reset to ${speakerId}`, 'speaker-picker-reset', () => {
+    close();
+    applySpeakerName(recordingId, speakerId, '');
+  });
+
+  document.body.appendChild(menu);
+  // Position under the chip, clamped into the viewport.
+  const r = chip.getBoundingClientRect();
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8));
+  const top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+
+  // Defer so the click that opened the menu doesn't immediately close it.
+  setTimeout(() => {
+    document.addEventListener('click', onDoc, true);
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('scroll', close, true);
+  }, 0);
 }
