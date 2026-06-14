@@ -84,6 +84,18 @@ impl LoudnessNormalizer {
 
         const TARGET_LUFS: f64 = -23.0;
         const ANALYZE_CHUNK_SIZE: usize = 512;
+        // Below this short-term loudness the signal is effectively silence.
+        // Chasing the target here cranks makeup gain to +40..+50 dB, which then
+        // brick-walls the next words into a square wave (the source of the
+        // crackle and a chunk of the diarization fragmentation). Hold instead.
+        const SILENCE_GATE_LUFS: f64 = -40.0;
+        // Cap makeup/attenuation as a backstop. The silence gate above is what
+        // actually prevents the noise-floor explosion, so this can stay generous:
+        // a quiet mic legitimately needs ~+15..+18 dB to reach -23 LUFS and match
+        // a hot source (e.g. FaceTime system audio). +12 dB was starving it.
+        const MAX_GAIN_DB: f64 = 20.0;
+        // Ease toward the target each 512-sample update (~10 ms) to avoid steps.
+        const GAIN_SMOOTHING: f32 = 0.15;
 
         let mut normalized_samples = Vec::with_capacity(samples.len());
 
@@ -96,13 +108,16 @@ impl LoudnessNormalizer {
                 if let Err(e) = self.ebur128.add_frames_f32(&self.loudness_buffer) {
                     warn!("Failed to add frames to EBU R128: {}", e);
                 } else {
-                    // Update gain based on cumulative loudness
+                    // Update gain based on cumulative loudness. Only adapt while
+                    // there is real signal, cap the makeup gain, and ease toward
+                    // the target so the encoder never sees a saturated waveform.
                     if let Ok(current_lufs) = self.ebur128.loudness_shortterm()
                         && current_lufs.is_finite()
-                        && current_lufs < 0.0
+                        && (SILENCE_GATE_LUFS..0.0).contains(&current_lufs)
                     {
-                        let gain_db = TARGET_LUFS - current_lufs;
-                        self.gain_linear = 10_f32.powf(gain_db as f32 / 20.0);
+                        let gain_db = (TARGET_LUFS - current_lufs).clamp(-MAX_GAIN_DB, MAX_GAIN_DB);
+                        let target_gain = 10_f32.powf(gain_db as f32 / 20.0);
+                        self.gain_linear += (target_gain - self.gain_linear) * GAIN_SMOOTHING;
                     }
                 }
                 self.loudness_buffer.clear();

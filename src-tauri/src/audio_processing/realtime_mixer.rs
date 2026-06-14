@@ -74,12 +74,19 @@ impl AdaptiveGain {
 
         let current_rms = (self.sum_sq / self.rms_window.len() as f64).sqrt() as f32;
 
-        // Calculate target gain
-        let target_gain = if current_rms > 0.0001 {
-            // Limit gain to reasonable range (0.1x to 10x = -20dB to +20dB)
-            (self.target_rms / current_rms).clamp(0.1, 10.0)
+        // Chase the target only while there is real signal. During a silent gap
+        // the RMS plummets and, without this gate, the controller cranks toward
+        // the +12 dB ceiling — then blasts the first words of the next phrase
+        // straight into soft_clip (a square wave), recreating exactly the
+        // distortion the upstream EBU silence-gate was added to prevent. Hold the
+        // last speech-adapted gain through silence instead. Sources are already
+        // EBU-normalized to a fixed loudness upstream, so this stage only trims
+        // residual level differences (it can still boost up to +12 dB).
+        const SILENCE_GATE_RMS: f32 = 0.0056; // ≈ -45 dBFS RMS
+        let target_gain = if current_rms > SILENCE_GATE_RMS {
+            (self.target_rms / current_rms).clamp(0.1, 4.0)
         } else {
-            1.0 // No signal, use unity gain
+            self.current_gain // hold through silence — do not chase the noise floor
         };
 
         // Smooth gain changes to avoid clicks
@@ -241,12 +248,15 @@ fn run_realtime_mixer(output_path: PathBuf, should_stop: Arc<AtomicBool>) -> Res
                         let sl = sys_left.get(i).copied().unwrap_or(0.0) * sg;
                         let sr = sys_right.get(i).copied().unwrap_or(0.0) * sg;
 
-                        // Mix with soft clipping
+                        // Mix with soft clipping at full level (the transcription
+                        // tap below reads this; headroom is applied afterwards).
                         mixed_left.push(soft_clip(ml + sl));
                         mixed_right.push(soft_clip(mr + sr));
                     }
 
-                    // Tap mixed audio to transcription buffer (48kHz stereo → 16kHz mono)
+                    // Tap the full-level mix to transcription (48kHz stereo → 16kHz
+                    // mono). Live ASR does not go through Vorbis, so it must NOT be
+                    // attenuated by the encoder headroom.
                     feed_transcription_resampler(
                         &mixed_left,
                         &mixed_right,
@@ -254,6 +264,10 @@ fn run_realtime_mixer(output_path: PathBuf, should_stop: Arc<AtomicBool>) -> Res
                         &mut transcription_accum,
                         transcription_chunk_size,
                     );
+
+                    // Apply encoder headroom to the Vorbis-bound samples only.
+                    apply_headroom(&mut mixed_left);
+                    apply_headroom(&mut mixed_right);
 
                     let slices: Vec<&[f32]> = vec![&mixed_left, &mixed_right];
                     encoder.encode_audio_block(&slices)?;
@@ -390,6 +404,10 @@ fn drain_and_encode(
             transcription_chunk_size,
         );
 
+        // Encoder headroom on the Vorbis-bound samples only (see main loop).
+        apply_headroom(&mut mixed_left);
+        apply_headroom(&mut mixed_right);
+
         let slices: Vec<&[f32]> = vec![&mixed_left, &mixed_right];
         encoder.encode_audio_block(&slices)?;
     }
@@ -440,6 +458,27 @@ fn flush_transcription_resampler(resampler: &mut SincFixedIn<f32>, accum: &mut V
         && !resampled[0].is_empty()
     {
         TRANSCRIPTION_BUFFER.push(&resampled[0]);
+    }
+}
+
+/// Headroom applied to the Vorbis-bound mix only (−6 dB).
+/// `soft_clip` (tanh) bounds the encoder input to ±1.0, but the Vorbis MDCT
+/// round-trip reconstructs decoded peaks above that bound. Without headroom
+/// those overshoot samples hard-clip when the OGG is later decoded to i16 for
+/// transcription/diarization. −6 dB keeps the decoded peak well under 0 dBFS,
+/// absorbing both MDCT overshoot and the inter-sample peaks the upstream
+/// (sample-peak) limiter does not catch. The lost loudness is recoverable at
+/// playback and is irrelevant to the internally-normalizing diarizer.
+/// NOTE: applied via `apply_headroom` to the encoder slices ONLY — the live
+/// transcription tap reads the full-level mix (it never goes through Vorbis).
+const ENCODER_HEADROOM: f32 = 0.5;
+
+/// Scale samples in place by the encoder headroom. Applied to the Vorbis-bound
+/// buffers after the full-level mix has been tapped for live transcription.
+#[inline]
+fn apply_headroom(samples: &mut [f32]) {
+    for s in samples.iter_mut() {
+        *s *= ENCODER_HEADROOM;
     }
 }
 
