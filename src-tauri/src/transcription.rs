@@ -726,15 +726,29 @@ pub async fn get_speaker_samples(
     let tj: TranscriptJson =
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse transcript: {}", e))?;
 
+    // Turns of this speaker long enough to recognize the voice (>= ~1.2 s),
+    // EARLIEST first: shallow offsets keep the snippet decode fast (the player
+    // decodes the file up to the sample, having no native seek).
     let mut segs: Vec<&TranscriptSegment> = tj
         .segments
         .iter()
-        .filter(|s| s.speaker_id == speaker_id && !s.text.trim().is_empty())
+        .filter(|s| {
+            s.speaker_id == speaker_id
+                && !s.text.trim().is_empty()
+                && (s.end_time - s.start_time) >= 1.2
+        })
         .collect();
-    // Longest first.
+    // Fall back to any non-empty turns if the speaker has no long ones.
+    if segs.is_empty() {
+        segs = tj
+            .segments
+            .iter()
+            .filter(|s| s.speaker_id == speaker_id && !s.text.trim().is_empty())
+            .collect();
+    }
     segs.sort_by(|a, b| {
-        (b.end_time - b.start_time)
-            .partial_cmp(&(a.end_time - a.start_time))
+        a.start_time
+            .partial_cmp(&b.start_time)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(segs
