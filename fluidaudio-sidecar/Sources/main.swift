@@ -295,16 +295,18 @@ func mergeAsrWithDiarization(
 
     var snappedWords: [WordWithSpeaker] = []
     for group in wordGroups {
-        var counts: [String: Int] = [:]
-        for w in group { counts[w.speakerId, default: 0] += 1 }
-        // Dominant speaker by token count; ties resolve to the word's first
-        // token (iterate in order, switch only on strictly greater count).
+        // Dominant speaker by overlap DURATION, not token count: the speaker who
+        // owns the most of the word's time wins, so a long final token can't be
+        // outvoted by two tiny leading ones. Ties resolve to the word's first
+        // token (iterate in order, switch only on strictly greater duration).
+        var byDuration: [String: Double] = [:]
+        for w in group { byDuration[w.speakerId, default: 0] += max(0, w.endTime - w.startTime) }
         var dominant = group[0].speakerId
-        var best = counts[dominant] ?? 0
+        var best = byDuration[dominant] ?? 0
         for w in group {
-            let c = counts[w.speakerId] ?? 0
-            if c > best {
-                best = c
+            let d = byDuration[w.speakerId] ?? 0
+            if d > best {
+                best = d
                 dominant = w.speakerId
             }
         }
@@ -807,10 +809,23 @@ struct FluidAudioSidecar {
                 if !cached { writeProgress("Downloading diarizer", 20) }
                 let tDiarInit = CFAbsoluteTimeGetCurrent()
                 var diarizerConfig = OfflineDiarizerConfig()
+                // Tuned for mixed-mono call audio (mic + compressed loopback).
+                // No-regret reverts of earlier aggressive overrides toward sane
+                // FluidAudio defaults (panel review):
+                //  - excludeOverlap=true: don't feed crosstalk frames into the
+                //    embedding model — keeps per-speaker centroids pure.
+                //  - minSegmentDuration 0.1→0.3: a 0.1 s window off 32 kbps Opus
+                //    yields a noise embedding; 0.3 s is stable without nuking
+                //    short turns.
+                //  - minGapDuration 0.3→0.45: bridge Opus/HFP false micro-gaps
+                //    inside one speaker's phrase (same-speaker merge only).
+                // clusteringThreshold (0.12) and minSpeakers (2) are LEFT as-is:
+                // changing them blind is a guess — they need a measured DER sweep
+                // on labeled clips first.
                 diarizerConfig.clusteringThreshold = 0.12
-                diarizerConfig.embeddingExcludeOverlap = false
-                diarizerConfig.minSegmentDuration = 0.1
-                diarizerConfig.minGapDuration = 0.3
+                diarizerConfig.embeddingExcludeOverlap = true
+                diarizerConfig.minSegmentDuration = 0.3
+                diarizerConfig.minGapDuration = 0.45
                 diarizerConfig.clustering.minSpeakers = 2
                 let mgr = OfflineDiarizerManager(config: diarizerConfig)
                 try await mgr.prepareModels()

@@ -421,7 +421,7 @@ async fn transcribe_recording_inner(
     // render a hint of what the call was about without re-reading the whole
     // transcript on every refresh. ~200 chars, broken at word boundary.
     let preview_text = render_transcript_from_json(&transcript_json);
-    let preview = preview_from_rendered(&preview_text);
+    let preview = preview_from_transcript(&transcript_json);
     if let Ok(mut meta) = crate::storage::read_metadata(&recording_id)
         && meta.transcript_preview.as_deref() != Some(preview.as_str())
     {
@@ -507,6 +507,13 @@ fn escape_html(s: &str) -> String {
 ///   apply here only; `segments`/`text` are never mutated. Whitespace-only
 ///   segments are dropped so they can't emit an empty header.
 pub(crate) fn render_transcript_from_json(tj: &TranscriptJson) -> String {
+    render_impl(tj, true)
+}
+
+/// Shared renderer. `escape_names` is true for display (output flows through
+/// Markdown→`innerHTML`); false for the plain-text recordings-list preview,
+/// which must keep `&`/`<` literal (e.g. "R&D"), not HTML entities.
+fn render_impl(tj: &TranscriptJson, escape_names: bool) -> String {
     if tj.segments.is_empty() {
         return tj.text.clone().unwrap_or_default();
     }
@@ -522,11 +529,21 @@ pub(crate) fn render_transcript_from_json(tj: &TranscriptJson) -> String {
 
     let distinct: HashSet<&str> = segs.iter().map(|(id, _)| *id).collect();
     if distinct.len() <= 1 {
-        return tj.text.clone().unwrap_or_default();
+        // Prefer the flat `text` (final wording + spacing); fall back to joining
+        // the segments only if a transcript somehow has segments but no `text`.
+        return match tj.text.as_deref() {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => segs.iter().map(|(_, t)| *t).collect::<Vec<_>>().join(" "),
+        };
     }
 
     let display = |id: &str| -> String {
-        escape_html(tj.speaker_names.get(id).map(String::as_str).unwrap_or(id))
+        let name = tj.speaker_names.get(id).map(String::as_str).unwrap_or(id);
+        if escape_names {
+            escape_html(name)
+        } else {
+            name.to_string()
+        }
     };
     let mut out = String::new();
     let mut current = String::new();
@@ -547,10 +564,11 @@ pub(crate) fn render_transcript_from_json(tj: &TranscriptJson) -> String {
     out.trim_end().to_string()
 }
 
-/// Recordings-list preview from already-rendered transcript text: strip the `**`
-/// speaker-header markers so the list reads as plain prose, then truncate.
-fn preview_from_rendered(rendered: &str) -> String {
-    truncate_preview(&rendered.replace("**", ""), 200)
+/// Recordings-list preview: render with RAW (unescaped) names, strip the `**`
+/// speaker-header markers so it reads as plain prose, then truncate. Unescaped
+/// because the list shows it as plain text — `&`/`<` must stay literal.
+fn preview_from_transcript(tj: &TranscriptJson) -> String {
+    truncate_preview(&render_impl(tj, false).replace("**", ""), 200)
 }
 
 /// Render transcript text on the fly from transcript.json (with .md fallback)
@@ -726,7 +744,7 @@ pub async fn rename_speaker(
     let rendered = render_transcript_from_json(&tj);
     // Keep the recordings-list preview in sync with the new name.
     if let Ok(mut meta) = crate::storage::read_metadata(&recording_id) {
-        let preview = preview_from_rendered(&rendered);
+        let preview = preview_from_transcript(&tj);
         meta.transcript_preview = if preview.is_empty() {
             None
         } else {
@@ -980,7 +998,7 @@ mod tests {
               {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
             ]}"#,
         );
-        let p = preview_from_rendered(&render_transcript_from_json(&t));
+        let p = preview_from_transcript(&t);
         assert!(!p.contains("**"), "preview must read as plain prose: {p:?}");
         assert!(p.contains("Speaker 1") && p.contains("hi"));
     }

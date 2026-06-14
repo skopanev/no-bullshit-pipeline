@@ -605,10 +605,14 @@ listen('transcription_progress', (event) => {
   }
 });
 
-/** Remove any speaker rename bar(s) and the floating contact picker. */
+// Close fn of the currently-open contact picker, so it can be torn down (with
+// its document/window listeners) from outside — not just by clicking away.
+let activePickerClose = null;
+
+/** Remove any speaker rename bar(s) and fully close the floating contact picker. */
 function clearSpeakerBar() {
   document.querySelectorAll('.speaker-bar').forEach((el) => el.remove());
-  document.querySelector('.speaker-picker')?.remove();
+  if (activePickerClose) activePickerClose();
 }
 
 /**
@@ -684,7 +688,7 @@ async function applySpeakerName(recordingId, speakerId, name) {
  * "Speaker N" label. (macOS Contacts — with photos — can feed this list later.)
  */
 function openSpeakerPicker(chip, recordingId, speakerId) {
-  document.querySelector('.speaker-picker')?.remove();
+  if (activePickerClose) activePickerClose();
 
   const rec = state.allRecordings.find((r) => r.id === recordingId);
   const attendees = rec && Array.isArray(rec.attendees) ? rec.attendees : [];
@@ -699,7 +703,9 @@ function openSpeakerPicker(chip, recordingId, speakerId) {
     document.removeEventListener('click', onDoc, true);
     document.removeEventListener('keydown', onKey, true);
     window.removeEventListener('scroll', close, true);
+    if (activePickerClose === close) activePickerClose = null;
   }
+  activePickerClose = close;
   function onDoc(e) {
     if (!menu.contains(e.target)) close();
   }
@@ -743,7 +749,7 @@ function openSpeakerPicker(chip, recordingId, speakerId) {
   // Position under the chip, clamped into the viewport.
   const r = chip.getBoundingClientRect();
   const left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8));
-  const top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+  const top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8));
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
 
