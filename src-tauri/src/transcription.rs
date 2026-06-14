@@ -2,7 +2,7 @@ use crate::config::{TranscriptionProvider, load_settings};
 use crate::storage::{get_data_dir, read_metadata};
 use crate::transcript_migration::{TranscriptMetadata, TranscriptSource};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::Emitter;
 use tauri_plugin_shell::ShellExt;
@@ -44,10 +44,32 @@ pub fn is_transcribing(recording_id: String, state: tauri::State<'_, Transcripti
         .contains(&recording_id)
 }
 
+/// One diarized speaker turn as emitted by the sidecar JSON (camelCase keys).
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct SidecarSegment {
+    speaker_id: String,
+    start_time: f64,
+    end_time: f64,
+    text: String,
+}
+
 #[derive(Deserialize, Debug)]
 struct FluidAudioOutput {
     model: String,
     text: String,
+    /// Diarized turns. Absent on the AppleSpeech / no-diarize sidecars → empty.
+    #[serde(default)]
+    segments: Vec<SidecarSegment>,
+}
+
+/// One diarized speaker turn persisted in transcript.json.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct TranscriptSegment {
+    pub speaker_id: String,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub text: String,
 }
 
 /// JSON transcript stored as transcript.json (source of truth)
@@ -61,6 +83,15 @@ pub(crate) struct TranscriptJson {
     language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    /// Diarized speaker turns. Empty for legacy transcripts (serde default) and
+    /// for the AppleSpeech / no-diarize paths — render then falls back to `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    segments: Vec<TranscriptSegment>,
+    /// User renames: original speaker id ("Speaker 1") → display name. Applied
+    /// only at render time — `segments`/`text` are never rewritten, so the
+    /// verbatim record stays intact and a rename is fully reversible.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    speaker_names: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -264,6 +295,8 @@ async fn transcribe_recording_inner(
                 duration_sec,
                 language: Some("auto".to_string()),
                 text: Some(out.text),
+                segments: to_transcript_segments(out.segments),
+                speaker_names: HashMap::new(),
             }
         }
         TranscriptionProvider::FluidAudio
@@ -368,6 +401,8 @@ async fn transcribe_recording_inner(
                 duration_sec,
                 language: Some("auto".to_string()),
                 text: Some(fa_output.text),
+                segments: to_transcript_segments(fa_output.segments),
+                speaker_names: HashMap::new(),
             }
         }
     };
@@ -386,7 +421,7 @@ async fn transcribe_recording_inner(
     // render a hint of what the call was about without re-reading the whole
     // transcript on every refresh. ~200 chars, broken at word boundary.
     let preview_text = render_transcript_from_json(&transcript_json);
-    let preview = truncate_preview(&preview_text, 200);
+    let preview = preview_from_transcript(&transcript_json);
     if let Ok(mut meta) = crate::storage::read_metadata(&recording_id)
         && meta.transcript_preview.as_deref() != Some(preview.as_str())
     {
@@ -435,9 +470,74 @@ fn truncate_preview(text: &str, max: usize) -> String {
     format!("{}…", cleaned[..word_end].trim_end())
 }
 
-/// Render text from a TranscriptJson struct
+/// Map the sidecar's segments into the persisted form.
+fn to_transcript_segments(segments: Vec<SidecarSegment>) -> Vec<TranscriptSegment> {
+    segments
+        .into_iter()
+        .map(|s| TranscriptSegment {
+            speaker_id: s.speaker_id,
+            start_time: s.start_time,
+            end_time: s.end_time,
+            text: s.text,
+        })
+        .collect()
+}
+
+/// Render display text from a TranscriptJson.
+///
+/// - No segments (legacy transcripts, AppleSpeech, `--no-diarize`) → the flat
+///   `text` verbatim, exactly as before.
+/// - One distinct speaker → plain prose, no speaker headers (a lone "Speaker 1"
+///   turn from the no-diarize path shouldn't sprout a label).
+/// - Multiple speakers → `**Name:**` headers, where `Name` is the user rename
+///   from `speaker_names` if present, else the original id. Renames are applied
+///   here only; `segments`/`text` are never mutated.
 pub(crate) fn render_transcript_from_json(tj: &TranscriptJson) -> String {
-    tj.text.clone().unwrap_or_default()
+    if tj.segments.is_empty() {
+        return tj.text.clone().unwrap_or_default();
+    }
+
+    let distinct: HashSet<&str> = tj.segments.iter().map(|s| s.speaker_id.as_str()).collect();
+    if distinct.len() <= 1 {
+        return tj
+            .segments
+            .iter()
+            .map(|s| s.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    let mut out = String::new();
+    let mut current = "";
+    for seg in &tj.segments {
+        if seg.speaker_id != current {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            let name = tj
+                .speaker_names
+                .get(&seg.speaker_id)
+                .map(String::as_str)
+                .unwrap_or(seg.speaker_id.as_str());
+            out.push_str("**");
+            out.push_str(name);
+            out.push_str(":**\n");
+            current = &seg.speaker_id;
+        }
+        let t = seg.text.trim();
+        if !t.is_empty() {
+            out.push_str(t);
+            out.push('\n');
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Recordings-list preview from a transcript: rendered text with the `**`
+/// speaker-header markers stripped so the list reads as plain prose.
+fn preview_from_transcript(tj: &TranscriptJson) -> String {
+    truncate_preview(&render_transcript_from_json(tj).replace("**", ""), 200)
 }
 
 /// Render transcript text on the fly from transcript.json (with .md fallback)
@@ -532,6 +632,96 @@ pub async fn export_transcript_md(
     }
 
     Ok(())
+}
+
+/// One diarized speaker for the rename UI: the original id plus the user's
+/// current display name (if any).
+#[derive(Serialize)]
+pub struct SpeakerInfo {
+    speaker_id: String,
+    display_name: Option<String>,
+}
+
+/// Distinct speakers in a recording, in first-seen order, with current renames.
+/// Empty when the recording has no diarized segments (legacy / no-diarize),
+/// which the UI uses to hide the rename affordance.
+#[tauri::command]
+pub async fn get_speakers(recording_id: String) -> Result<Vec<SpeakerInfo>, String> {
+    let json_path = get_data_dir().join(&recording_id).join("transcript.json");
+    if !json_path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&json_path)
+        .map_err(|e| format!("Failed to read transcript: {}", e))?;
+    let tj: TranscriptJson =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse transcript: {}", e))?;
+
+    let mut seen = HashSet::new();
+    let mut speakers = Vec::new();
+    for seg in &tj.segments {
+        if seen.insert(seg.speaker_id.as_str()) {
+            speakers.push(SpeakerInfo {
+                speaker_id: seg.speaker_id.clone(),
+                display_name: tj.speaker_names.get(&seg.speaker_id).cloned(),
+            });
+        }
+    }
+    Ok(speakers)
+}
+
+/// Rename one diarized speaker for a single recording. Stores the mapping in
+/// transcript.json's `speaker_names` (applied only at render) — never rewrites
+/// `text`/`segments`, so it's reversible and can't corrupt prose that happens
+/// to contain a literal "Speaker 1". A blank name or the original id clears the
+/// rename. Returns the freshly rendered transcript for immediate UI refresh.
+#[tauri::command]
+pub async fn rename_speaker(
+    recording_id: String,
+    speaker_id: String,
+    display_name: String,
+) -> Result<String, String> {
+    let json_path = get_data_dir().join(&recording_id).join("transcript.json");
+    let content = std::fs::read_to_string(&json_path)
+        .map_err(|e| format!("Failed to read transcript: {}", e))?;
+    let mut tj: TranscriptJson =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse transcript: {}", e))?;
+
+    if !tj.segments.iter().any(|s| s.speaker_id == speaker_id) {
+        return Err(format!(
+            "Speaker '{}' not found in this transcript",
+            speaker_id
+        ));
+    }
+
+    let name = display_name.trim();
+    if name.is_empty() || name == speaker_id {
+        tj.speaker_names.remove(&speaker_id);
+    } else {
+        tj.speaker_names
+            .insert(speaker_id.clone(), name.to_string());
+    }
+
+    // Atomic write (temp + rename), same pattern as the transcribe path.
+    let json_str = serde_json::to_string_pretty(&tj)
+        .map_err(|e| format!("Failed to serialize transcript: {}", e))?;
+    let temp_path = json_path.with_extension("json.tmp");
+    std::fs::write(&temp_path, &json_str)
+        .map_err(|e| format!("Failed to write transcript: {}", e))?;
+    std::fs::rename(&temp_path, &json_path)
+        .map_err(|e| format!("Failed to finalize transcript: {}", e))?;
+
+    // Keep the recordings-list preview in sync with the new name.
+    if let Ok(mut meta) = crate::storage::read_metadata(&recording_id) {
+        let preview = preview_from_transcript(&tj);
+        meta.transcript_preview = if preview.is_empty() {
+            None
+        } else {
+            Some(preview)
+        };
+        let _ = crate::storage::write_metadata(&meta);
+    }
+
+    Ok(render_transcript_from_json(&tj))
 }
 
 pub fn convert_ogg_to_wav(
@@ -639,4 +829,186 @@ pub fn convert_ogg_to_wav(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tj(json: &str) -> TranscriptJson {
+        serde_json::from_str(json).expect("deserialize TranscriptJson")
+    }
+
+    #[test]
+    fn legacy_text_only_renders_verbatim() {
+        // The exact shape every pre-diarization transcript on disk has: no
+        // `segments` key. serde(default) must fill it empty and render the flat
+        // text verbatim — zero behavior change for existing recordings.
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"hello world"}"#,
+        );
+        assert!(t.segments.is_empty());
+        assert!(t.speaker_names.is_empty());
+        assert_eq!(render_transcript_from_json(&t), "hello world");
+    }
+
+    #[test]
+    fn single_speaker_has_no_headers() {
+        // The --no-diarize path emits one "Speaker 1" segment; it must read as
+        // plain prose, not sprout a header.
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"a b",
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"a"},
+              {"speaker_id":"Speaker 1","start_time":1.0,"end_time":2.0,"text":"b"}
+            ]}"#,
+        );
+        let r = render_transcript_from_json(&t);
+        assert!(
+            !r.contains("**"),
+            "single speaker must have no headers: {r:?}"
+        );
+        assert_eq!(r, "a b");
+    }
+
+    #[test]
+    fn multi_speaker_renders_headers() {
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"flat",
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"hi"},
+              {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
+            ]}"#,
+        );
+        let r = render_transcript_from_json(&t);
+        assert!(r.contains("**Speaker 1:**"), "{r}");
+        assert!(r.contains("**Speaker 2:**"), "{r}");
+        assert!(r.contains("hi") && r.contains("yo"));
+    }
+
+    #[test]
+    fn rename_applied_at_render_never_mutates_record() {
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"flat",
+            "speaker_names":{"Speaker 1":"Alice"},
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"hi"},
+              {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
+            ]}"#,
+        );
+        let r = render_transcript_from_json(&t);
+        assert!(r.contains("**Alice:**"), "rename applied at render: {r}");
+        assert!(!r.contains("**Speaker 1:**"));
+        assert!(r.contains("**Speaker 2:**"), "un-renamed speaker stays");
+        // The verbatim record is never rewritten — only the render reflects names.
+        assert_eq!(t.text.as_deref(), Some("flat"));
+        assert_eq!(t.segments[0].speaker_id, "Speaker 1");
+        assert_eq!(t.segments[0].text, "hi");
+    }
+
+    #[test]
+    fn preview_strips_speaker_markers() {
+        let t = tj(
+            r#"{"source":"local","model":"m","created_at":"t","duration_sec":1.0,"text":"flat",
+            "segments":[
+              {"speaker_id":"Speaker 1","start_time":0.0,"end_time":1.0,"text":"hi"},
+              {"speaker_id":"Speaker 2","start_time":1.0,"end_time":2.0,"text":"yo"}
+            ]}"#,
+        );
+        let p = preview_from_transcript(&t);
+        assert!(!p.contains("**"), "preview must read as plain prose: {p:?}");
+        assert!(p.contains("Speaker 1") && p.contains("hi"));
+    }
+
+    /// Backward-compat smoke test over the developer's real recordings. Skips
+    /// gracefully when `~/nbp-data` isn't present (CI / fresh checkout).
+    #[test]
+    fn real_recordings_still_deserialize_and_render() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let data = std::path::Path::new(&home).join("nbp-data");
+        if !data.is_dir() {
+            eprintln!(
+                "skipping real-recording check: {} not present",
+                data.display()
+            );
+            return;
+        }
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&data).unwrap().flatten() {
+            let path = entry.path().join("transcript.json");
+            if !path.exists() {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).unwrap();
+            let t: TranscriptJson = serde_json::from_str(&content)
+                .unwrap_or_else(|e| panic!("failed to deserialize {}: {}", path.display(), e));
+            let rendered = render_transcript_from_json(&t);
+            // Every existing transcript has no segments → render MUST equal the
+            // stored text verbatim. Any drift means we broke an old recording.
+            if t.segments.is_empty() {
+                assert_eq!(
+                    rendered,
+                    t.text.clone().unwrap_or_default(),
+                    "legacy render drifted for {}",
+                    path.display()
+                );
+            }
+            checked += 1;
+        }
+        eprintln!("real_recordings: verified {checked} transcript.json files");
+        assert!(
+            checked > 0,
+            "expected at least one real transcript to verify"
+        );
+    }
+
+    /// End-to-end over a REAL sidecar run: point `NBP_SIDECAR_JSON` at a captured
+    /// `fluidaudio-sidecar` stdout and this exercises the exact production path —
+    /// parse `FluidAudioOutput` (camelCase) → `to_transcript_segments` →
+    /// `TranscriptJson` → render — plus a rename. Skips when the env var is unset.
+    #[test]
+    fn sidecar_output_roundtrips_through_render() {
+        let Ok(path) = std::env::var("NBP_SIDECAR_JSON") else {
+            return;
+        };
+        let raw = std::fs::read_to_string(&path).expect("read sidecar json");
+        let fa: FluidAudioOutput = serde_json::from_str(&raw).expect("parse sidecar output");
+        assert!(!fa.segments.is_empty(), "sidecar produced no segments");
+
+        let mut tj = TranscriptJson {
+            source: TranscriptSource::Local,
+            model: fa.model,
+            created_at: "t".to_string(),
+            duration_sec: 0.0,
+            language: Some("auto".to_string()),
+            text: Some(fa.text),
+            segments: to_transcript_segments(fa.segments),
+            speaker_names: HashMap::new(),
+        };
+
+        let rendered = render_transcript_from_json(&tj);
+        let distinct: HashSet<&str> = tj.segments.iter().map(|s| s.speaker_id.as_str()).collect();
+        eprintln!(
+            "\n--- rendered ({} speakers) ---\n{}\n",
+            distinct.len(),
+            rendered
+        );
+        if distinct.len() > 1 {
+            assert!(
+                rendered.contains("**"),
+                "multi-speaker render must have headers"
+            );
+        }
+
+        // Rename the first speaker and confirm only the render changes.
+        if let Some(first) = tj.segments.first().map(|s| s.speaker_id.clone()) {
+            tj.speaker_names.insert(first.clone(), "Сергей".to_string());
+            let renamed = render_transcript_from_json(&tj);
+            eprintln!("--- after rename {first} → Сергей ---\n{}\n", renamed);
+            assert!(renamed.contains("**Сергей:**"));
+            assert_eq!(tj.segments[0].speaker_id, first, "record itself untouched");
+        }
+    }
 }

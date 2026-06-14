@@ -223,11 +223,13 @@ export async function showDetailView(id) {
     const rawToggle = document.getElementById('transcript-raw-toggle');
 
     try {
+      clearSpeakerBar();
       const isTranscribing = await invoke('is_transcribing', { recordingId: id });
       const transcript = await invoke('get_transcript', { recordingId: id });
 
       if (transcript) {
         applyMarkdownRendering(detailTranscriptEl, transcript);
+        renderSpeakerBar(id);
         detailTranscriptEl.classList.remove('empty');
         if (saveTranscriptBtn) saveTranscriptBtn.style.display = '';
         if (rawToggle) rawToggle.style.display = looksLikeMarkdown(transcript) ? '' : 'none';
@@ -496,6 +498,7 @@ if (processBtn) {
 
       if (detailTranscriptEl) {
         applyMarkdownRendering(detailTranscriptEl, transcript);
+        renderSpeakerBar(recordingId);
         detailTranscriptEl.classList.remove('empty');
       }
       if (saveTranscriptBtnGlobal) saveTranscriptBtnGlobal.style.display = '';
@@ -556,6 +559,7 @@ listen('transcription_progress', (event) => {
           if (state.selectedRecordingId !== recording_id) return;
           if (transcript) {
             applyMarkdownRendering(detailTranscriptEl, transcript);
+            renderSpeakerBar(recording_id);
             detailTranscriptEl.classList.remove('empty');
           }
         })
@@ -599,3 +603,65 @@ listen('transcription_progress', (event) => {
     }
   }
 });
+
+/** Remove the speaker rename bar if one is shown. */
+function clearSpeakerBar() {
+  document.getElementById('speaker-bar')?.remove();
+}
+
+/**
+ * Render an inline speaker-rename bar above the transcript. Only shown for
+ * multi-speaker (diarized) recordings. Renaming applies at render time on the
+ * backend — the transcript record itself is never rewritten — so it's safe and
+ * reversible. Re-renders the transcript and refreshes the list preview on rename.
+ */
+async function renderSpeakerBar(recordingId) {
+  const transcriptEl = document.getElementById('transcript-content');
+  if (!transcriptEl) return;
+  clearSpeakerBar();
+
+  let speakers = [];
+  try {
+    speakers = await invoke('get_speakers', { recordingId });
+  } catch (err) {
+    console.error('get_speakers failed:', err);
+    return;
+  }
+  // Only worth a rename bar when diarization actually split >1 speaker.
+  if (!speakers || speakers.length < 2) return;
+
+  const bar = document.createElement('div');
+  bar.id = 'speaker-bar';
+  bar.className = 'speaker-bar';
+  bar.innerHTML =
+    '<span class="speaker-bar-label">Speakers</span>' +
+    speakers
+      .map((s) => {
+        const name = s.display_name || s.speaker_id;
+        return `<button class="speaker-chip" data-speaker="${escapeHtml(s.speaker_id)}" title="Rename speaker">${escapeHtml(name)}</button>`;
+      })
+      .join('');
+  transcriptEl.parentNode.insertBefore(bar, transcriptEl);
+
+  bar.querySelectorAll('.speaker-chip').forEach((chip) => {
+    chip.addEventListener('click', async () => {
+      const speakerId = chip.dataset.speaker;
+      const newName = prompt(`Rename "${speakerId}" to:`, chip.textContent);
+      if (newName === null) return;
+      try {
+        const rendered = await invoke('rename_speaker', {
+          recordingId,
+          speakerId,
+          displayName: newName.trim(),
+        });
+        const el = document.getElementById('transcript-content');
+        if (el) applyMarkdownRendering(el, rendered);
+        await renderSpeakerBar(recordingId);
+        loadRecordings();
+      } catch (err) {
+        console.error('rename_speaker failed:', err);
+        showToast('Failed to rename speaker: ' + err, 'error');
+      }
+    });
+  });
+}

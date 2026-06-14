@@ -414,6 +414,8 @@ pub fn run() {
             transcription::is_transcribing,
             transcription::get_transcript,
             transcription::export_transcript_md,
+            transcription::get_speakers,
+            transcription::rename_speaker,
             playback::play_audio,
             playback::pause_audio,
             playback::resume_audio,

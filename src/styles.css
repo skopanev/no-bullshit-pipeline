@@ -2675,6 +2675,38 @@ input:checked + .slider:before {
   color: var(--text-primary);
 }
 
+/* Speaker rename bar above a diarized transcript */
+.speaker-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.speaker-bar-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+  opacity: 0.55;
+  margin-right: 2px;
+}
+.speaker-chip {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.speaker-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .checkbox-group {
   display: flex;
   align-items: center;
