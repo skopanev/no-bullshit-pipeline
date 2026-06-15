@@ -35,7 +35,10 @@ struct DictationPartial {
 pub struct StreamingSession {
     /// Public so the cpal callback can clone the sender. cpal::Stream is `!Send`
     /// on macOS so the streaming object itself can't be moved into the callback.
-    pub samples_tx: tokio::sync::mpsc::UnboundedSender<Vec<f32>>,
+    /// `Option` so `finish`/`cancel` can take it out to close the channel while
+    /// still satisfying the `Drop` impl (a type with `Drop` can't be
+    /// partially moved). Always `Some` for a live session.
+    pub samples_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<f32>>>,
     /// Source sample rate the internal resampler was built for. Used by the
     /// warm-pool consumer to verify compatibility with the chosen cpal device.
     pub source_rate: u32,
@@ -44,9 +47,44 @@ pub struct StreamingSession {
     pub source_channels: u16,
     final_text: Arc<Mutex<Option<String>>>,
     error_text: Arc<Mutex<Option<String>>>,
-    reader_task: tauri::async_runtime::JoinHandle<()>,
-    writer_task: tauri::async_runtime::JoinHandle<()>,
+    /// `Option` for the same take-on-consume reason as `samples_tx`. `Drop`
+    /// aborts whatever's left so a dropped (not explicitly finished/cancelled)
+    /// session kills its sidecar instead of letting it transcribe to the end.
+    reader_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    writer_task: Option<tauri::async_runtime::JoinHandle<()>>,
     cancelled: Arc<AtomicBool>,
+}
+
+/// Kills the streaming sidecar if the writer task is dropped while still armed
+/// (i.e. the task was aborted mid-stream). On a normal loop exit the writer
+/// disarms this first and drops the child gracefully, so the sidecar gets EOF
+/// on stdin and flushes its final transcript. Dropping a `CommandChild` alone
+/// does NOT terminate the process — only `kill()` does.
+struct StreamSidecarKiller(Option<tauri_plugin_shell::process::CommandChild>);
+
+impl Drop for StreamSidecarKiller {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.take() {
+            let _ = child.kill();
+        }
+    }
+}
+
+impl Drop for StreamingSession {
+    fn drop(&mut self) {
+        // If we still own the task handles, the session was dropped WITHOUT a
+        // graceful `finish()`/`cancel()` (e.g. the parent pipeline task was
+        // aborted by Esc). A dropped `JoinHandle` only detaches — the tasks
+        // would keep running and the sidecar would transcribe to completion,
+        // model resident, burning CPU. Abort them so the writer's
+        // `StreamSidecarKiller` fires and kills the child promptly.
+        if let Some(h) = self.writer_task.take() {
+            h.abort();
+        }
+        if let Some(h) = self.reader_task.take() {
+            h.abort();
+        }
+    }
 }
 
 impl StreamingSession {
@@ -150,7 +188,11 @@ impl StreamingSession {
         // child is dropped, stdin closes, sidecar EOFs and flushes its final.
         let (samples_tx, mut samples_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
         let writer_task = tauri::async_runtime::spawn(async move {
-            let mut child = child;
+            // Armed killer: if this task is aborted (session dropped on Esc),
+            // the killer drops and SIGKILLs the sidecar. On a normal loop exit
+            // we disarm it below so the child drops gracefully (stdin EOF →
+            // sidecar flushes its final transcript).
+            let mut killer = StreamSidecarKiller(Some(child));
             let mut accumulator: Vec<f32> = Vec::with_capacity(4096);
             let mut resampler = match build_resampler(source_rate) {
                 Ok(r) => r,
@@ -164,8 +206,9 @@ impl StreamingSession {
 
             while let Some(samples) = samples_rx.recv().await {
                 let mono = downmix_to_mono(&samples, source_channels);
+                let child = killer.0.as_mut().expect("sidecar child present");
                 if !needs_resample {
-                    if let Err(e) = write_f32_samples(&mut child, &mono) {
+                    if let Err(e) = write_f32_samples(child, &mono) {
                         log::warn!("dictation streaming: stdin write failed: {}", e);
                         break;
                     }
@@ -181,36 +224,64 @@ impl StreamingSession {
                             break;
                         }
                     };
-                    if let Err(e) = write_f32_samples(&mut child, &out[0]) {
+                    if let Err(e) = write_f32_samples(child, &out[0]) {
                         log::warn!("dictation streaming: stdin write failed: {}", e);
                         break;
                     }
                 }
             }
-            // Drop the child handle to close stdin → sidecar sees EOF and emits
-            // the consolidated `final` event before terminating.
-            drop(child);
+            // Normal exit: disarm the killer and drop the child gracefully so
+            // stdin closes → the sidecar sees EOF and emits the consolidated
+            // `final` event before terminating (vs. an abort, which SIGKILLs).
+            drop(killer.0.take());
         });
 
         Ok(Self {
-            samples_tx,
+            samples_tx: Some(samples_tx),
             source_rate,
             source_channels,
             final_text,
             error_text,
-            reader_task,
-            writer_task,
+            reader_task: Some(reader_task),
+            writer_task: Some(writer_task),
             cancelled,
         })
     }
 
     /// Close the sample channel and wait for the sidecar to flush + emit
     /// final. Returns the consolidated transcript text.
-    pub async fn finish(self) -> Result<String, String> {
+    ///
+    /// Awaits the task handles *in place* (`as_mut`, not `take`) so that if THIS
+    /// future is dropped mid-await — e.g. the parent pipeline task is aborted by
+    /// Esc while we're waiting on the writer — `self` drops and
+    /// `Drop for StreamingSession` aborts the still-`Some` handles, firing the
+    /// writer's `StreamSidecarKiller` to SIGKILL the sidecar. On the normal path
+    /// we disarm (set the handles to `None`) before returning so `Drop` is a
+    /// no-op and the graceful EOF→final flush is preserved.
+    ///
+    /// FIXME(streaming-reenable): residual gap in the SECOND await below. Once
+    /// the writer has finished gracefully it has already disarmed its
+    /// `StreamSidecarKiller` and dropped the child (stdin EOF) — so if THIS
+    /// future is aborted while awaiting the *reader*, `Drop` aborts the reader
+    /// but nobody holds the child to `kill()` it; the sidecar runs its final
+    /// pass (~1–30s) before exiting on its own. Bounded, not a forever-leak, and
+    /// no stale paste (the caller's generation check guards that) — but wasteful.
+    /// Proper fix before re-enabling streaming: keep the child in an
+    /// `Arc<Mutex<Option<CommandChild>>>` shared with `StreamingSession` so
+    /// `Drop` can `kill()` it unconditionally while the reader is still `Some`.
+    pub async fn finish(mut self) -> Result<String, String> {
         // Close the sender so the writer drains, then everything cascades.
-        drop(self.samples_tx);
-        let _ = self.writer_task.await;
-        let _ = self.reader_task.await;
+        drop(self.samples_tx.take());
+        if let Some(h) = self.writer_task.as_mut() {
+            join_in_place(h).await;
+        }
+        if let Some(h) = self.reader_task.as_mut() {
+            join_in_place(h).await;
+        }
+        // Both finished gracefully — disarm so the trailing `Drop` doesn't abort
+        // already-completed tasks.
+        self.writer_task = None;
+        self.reader_task = None;
 
         if self.cancelled.load(Ordering::Relaxed) {
             return Ok(String::new());
@@ -232,13 +303,31 @@ impl StreamingSession {
             .unwrap_or_default())
     }
 
-    /// Abort streaming — used when the user hits Escape to cancel.
-    pub fn cancel(self) {
+    /// Abort streaming — used when the user hits Escape to cancel. Aborts both
+    /// tasks (the writer's `StreamSidecarKiller` then SIGKILLs the sidecar)
+    /// rather than `block_on`-waiting for a graceful drain: `cancel_inner` runs
+    /// inside the async Esc handler, and `block_on` from within a Tokio runtime
+    /// panics. Abort is non-blocking, kills immediately, and needs no await.
+    pub fn cancel(mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
-        drop(self.samples_tx);
-        let _ = tauri::async_runtime::block_on(self.writer_task);
-        let _ = tauri::async_runtime::block_on(self.reader_task);
+        drop(self.samples_tx.take());
+        if let Some(h) = self.writer_task.take() {
+            h.abort();
+        }
+        if let Some(h) = self.reader_task.take() {
+            h.abort();
+        }
     }
+}
+
+/// Await a `JoinHandle` through a mutable borrow so ownership stays in the
+/// caller's struct. If the caller's future is dropped mid-await, the handle is
+/// NOT moved here — it stays in the struct and its owner's `Drop` decides
+/// whether to abort it. (Awaiting a `JoinHandle` by value would detach, not
+/// abort, on drop — the bug this avoids.)
+async fn join_in_place(handle: &mut tauri::async_runtime::JoinHandle<()>) {
+    use std::future::Future;
+    let _ = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *handle).poll(cx)).await;
 }
 
 fn build_resampler(
