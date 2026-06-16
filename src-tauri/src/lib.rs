@@ -164,8 +164,8 @@ fn maybe_sweep_retention(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    // Init logging so log::info!/error! prints to stderr
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("nbp=debug")).init();
+    // Logging is initialized below via tauri-plugin-log (stdout + a log file in
+    // the OS log dir), so release builds keep durable logs a user can send.
 
     // Disable App Nap. Without this macOS throttles backgrounded tray apps
     // and Carbon HotKey events get queued for tens of seconds (or minutes)
@@ -186,6 +186,28 @@ pub fn run() {
     let settings = std::sync::Arc::new(std::sync::Mutex::new(config::load_settings()));
 
     tauri::Builder::default()
+        // Logging: write to BOTH stdout (visible under `bun run dev`) and a
+        // rotating file in the OS log dir (`~/Library/Logs/one.nbp.skk/`) so a
+        // user on a notarized release build — which has no stderr — can grab and
+        // send logs (incl. the DICT_DIAG cold-start telemetry). The plugin
+        // installs the global `log` backend, so every existing log::info!/warn!
+        // flows here with no call-site changes.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                // Builder::new() already defaults to Stdout + LogDir; .target()
+                // APPENDS, so without clear_targets() every line would be written
+                // twice (two file writers on the same path). Start from empty.
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                ))
+                .level(log::LevelFilter::Info)
+                .level_for("nbp_lib", log::LevelFilter::Debug)
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Focus the existing window when a second instance is launched
             if let Some(w) = app.get_webview_window("main") {
