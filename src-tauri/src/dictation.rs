@@ -1605,6 +1605,97 @@ fn write_mono_wav(path: &std::path::Path, samples: &[f32], sample_rate: u32) -> 
     Ok(())
 }
 
+fn read_sysctl_u64(name: &str) -> Option<u64> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut value: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            &mut value as *mut u64 as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0).then_some(value)
+}
+
+fn read_sysctl_i32(name: &str) -> Option<i32> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut value: i32 = 0;
+    let mut size = std::mem::size_of::<i32>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            &mut value as *mut i32 as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0).then_some(value)
+}
+
+/// Free + inactive (reclaimable) physical memory in MB, via mach
+/// `host_statistics64`. `None` if the call fails.
+#[allow(deprecated)] // libc::mach_host_self still works; avoids a mach2 dep
+fn free_memory_mb() -> Option<u64> {
+    unsafe {
+        let mut stats: libc::vm_statistics64 = std::mem::zeroed();
+        let mut count = (std::mem::size_of::<libc::vm_statistics64>()
+            / std::mem::size_of::<libc::integer_t>())
+            as libc::mach_msg_type_number_t;
+        let rc = libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            &mut stats as *mut _ as *mut libc::integer_t,
+            &mut count,
+        );
+        if rc != 0 {
+            return None;
+        }
+        let page = libc::sysconf(libc::_SC_PAGESIZE) as u64;
+        let reclaimable = stats.free_count as u64 + stats.inactive_count as u64;
+        Some(reclaimable * page / (1024 * 1024))
+    }
+}
+
+/// One-line system memory snapshot for the `DICT_DIAG` log line: total RAM, the
+/// macOS memory-pressure level, and free MB. Lets a user's `bun run dev` log
+/// show whether a slow transcription coincided with a low-RAM / pressured
+/// machine — the suspected cause of cold-start model reloads.
+fn system_mem_diag() -> String {
+    let total = read_sysctl_u64("hw.memsize")
+        .map(|b| format!("{:.1}GB", b as f64 / 1e9))
+        .unwrap_or_else(|| "?".into());
+    let pressure = match read_sysctl_i32("kern.memorystatus_vm_pressure_level") {
+        Some(1) => "normal",
+        Some(2) => "warning",
+        Some(4) => "critical",
+        Some(_) => "other",
+        None => "?",
+    };
+    let free = free_memory_mb()
+        .map(|m| format!("{}MB", m))
+        .unwrap_or_else(|| "?".into());
+    format!("mem_total={total} mem_free={free} pressure={pressure}")
+}
+
+/// Pull a `TIMING:<label>:<secs>s` value the sidecar prints on stderr. Used only
+/// for the DICT_DIAG breakdown (model-load vs inference).
+fn parse_sidecar_timing(stderr: &str, label: &str) -> String {
+    for line in stderr.lines() {
+        if let Some(rest) = line.strip_prefix("TIMING:")
+            && let Some((l, v)) = rest.split_once(':')
+            && l == label
+        {
+            return v.trim().to_string();
+        }
+    }
+    "?".into()
+}
+
 #[derive(serde::Deserialize)]
 struct FluidOut {
     text: String,
@@ -1674,6 +1765,20 @@ async fn run_fluidaudio(
         }
     }
 
+    // One grep-able diagnostic line per transcription, correlating the sidecar's
+    // phase timings (model cache-load vs CoreML init vs inference) with the
+    // machine's memory state. This is what to ask a user to paste from
+    // `bun run dev` when dictation is slow: a large model_init_s under
+    // pressure=warning/critical on a low mem_total = the cold-start reload.
+    log::info!(
+        "DICT_DIAG engine=fluidaudio {} audio_s={:.2} cache_load={} model_init={} transcribe={}",
+        system_mem_diag(),
+        samples_16k.len() as f64 / TARGET_RATE as f64,
+        parse_sidecar_timing(&stderr_buf, "asrModels.downloadAndLoad"),
+        parse_sidecar_timing(&stderr_buf, "asrManager.loadModels"),
+        parse_sidecar_timing(&stderr_buf, "asrManager.transcribe"),
+    );
+
     if exit_code != Some(0) {
         // "No speech detected" isn't a failure — it's the sidecar's polite
         // way of saying the audio was silent. Surface it as an empty
@@ -1737,6 +1842,16 @@ async fn run_apple_speech(
         }
     }
     let _ = std::fs::remove_file(&tmp);
+
+    // Apple Speech is OS-managed (model lives in a shared system daemon, not in
+    // this process), so there are no model-load phase timings to log — but the
+    // memory snapshot is still useful for comparing against the FluidAudio path.
+    log::info!(
+        "DICT_DIAG engine=apple-speech {} audio_s={:.2}",
+        system_mem_diag(),
+        samples_16k.len() as f64 / TARGET_RATE as f64,
+    );
+
     if exit_code != Some(0) {
         return Err(format!("Apple Speech sidecar failed: {}", stderr_buf));
     }
