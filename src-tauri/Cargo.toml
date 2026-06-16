@@ -1,6 +1,6 @@
 [package]
 name = "nbp"
-version = "0.6.25"
+version = "0.6.26"
 description = "A Tauri App"
 authors = ["sk"]
 edition = "2024"
@@ -33,8 +33,8 @@ tauri-plugin-shell = "2.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-cpal = "0.17"
-chrono = { version = "0.4.44", features = ["serde"] }
+cpal = "0.18"
+chrono = { version = "0.4.45", features = ["serde"] }
 hound = "3.5"
 uuid = { version = "1.23", features = ["v4", "serde"] }
 # System Audio Capture (Core Audio Taps)
@@ -45,7 +45,7 @@ ebur128 = "0.1.10"
 vorbis_rs = "0.5"
 lewton = "0.10"
 rubato = "3.0"
-log = "0.4.30"
+log = "0.4.32"
 reqwest = { version = "0.13", features = ["json", "blocking", "rustls", "stream", "multipart", "query", "form"] }
 futures-util = "0.3.32"
 tokio = { version = "1.52", features = ["fs", "io-util", "sync", "time", "process"] }

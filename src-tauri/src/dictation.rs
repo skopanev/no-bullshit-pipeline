@@ -590,10 +590,10 @@ fn open_mic_stream(
     // cpal `DeviceTrait::name` is deprecated in 0.17 but kept here: we only
     // compare input vs output device labels for the duck decision, and name()
     // is the stable shape. Grabbed here so the async side never touches cpal.
-    #[allow(deprecated)]
-    let input_name = device.name().ok();
-    #[allow(deprecated)]
-    let output_name = host.default_output_device().and_then(|d| d.name().ok());
+    let input_name = device.description().ok().map(|x| x.name().to_string());
+    let output_name = host
+        .default_output_device()
+        .and_then(|d| d.description().ok().map(|x| x.name().to_string()));
 
     Ok(MicSetup {
         stream,

@@ -106,7 +106,10 @@ impl MicAudioRecorder {
         let channels = config.channels();
         // Snapshot config facts for the debug log before `config` is consumed by
         // `config.into()` in the stream-build match below.
-        let device_id = device.name().unwrap_or_else(|_| "<unknown>".into());
+        let device_id = device
+            .description()
+            .map(|x| x.name().to_string())
+            .unwrap_or_else(|_| "<unknown>".into());
         let sample_format = config.sample_format();
         let buffer_size = format!("{:?}", config.buffer_size());
 

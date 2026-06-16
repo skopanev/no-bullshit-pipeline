@@ -32,12 +32,14 @@ pub struct AudioDeviceInfo {
 pub fn list_input_devices() -> Result<Vec<AudioDeviceInfo>, anyhow::Error> {
     let host = cpal::default_host();
     let default_device = host.default_input_device();
-    let default_name = default_device.as_ref().and_then(|d| d.name().ok());
+    let default_name = default_device
+        .as_ref()
+        .and_then(|d| d.description().ok().map(|x| x.name().to_string()));
 
     let devices: Vec<AudioDeviceInfo> = host
         .input_devices()?
         .filter_map(|device| {
-            let name = device.name().ok()?;
+            let name = device.description().ok()?.name().to_string();
             let config = device.default_input_config().ok()?;
             Some(AudioDeviceInfo {
                 id: name.clone(),
@@ -67,7 +69,11 @@ pub fn get_input_devices() -> Result<Vec<AudioDeviceInfo>, String> {
 #[allow(deprecated)]
 pub fn get_device_by_name(name: &str) -> Option<cpal::Device> {
     let host = cpal::default_host();
-    host.input_devices()
-        .ok()?
-        .find(|d| d.name().ok().as_deref() == Some(name))
+    host.input_devices().ok()?.find(|d| {
+        d.description()
+            .ok()
+            .map(|x| x.name().to_string())
+            .as_deref()
+            == Some(name)
+    })
 }

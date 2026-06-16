@@ -48,7 +48,7 @@ pub fn build_input_stream(
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
+            config.into(),
             move |data: &[f32], _: &_| {
                 let _ = producer.push_slice(data);
             },
@@ -58,7 +58,7 @@ pub fn build_input_stream(
         cpal::SampleFormat::I16 => {
             let mut scratch: Vec<f32> = Vec::with_capacity(SCRATCH_SAMPLES);
             device.build_input_stream(
-                &config.into(),
+                config.into(),
                 move |data: &[i16], _: &_| {
                     // Convert in scratch-sized chunks so `extend` can never grow
                     // the scratch past its reserved capacity (= realloc on the
@@ -76,7 +76,7 @@ pub fn build_input_stream(
         cpal::SampleFormat::U16 => {
             let mut scratch: Vec<f32> = Vec::with_capacity(SCRATCH_SAMPLES);
             device.build_input_stream(
-                &config.into(),
+                config.into(),
                 move |data: &[u16], _: &_| {
                     for chunk in data.chunks(SCRATCH_SAMPLES) {
                         scratch.clear();
