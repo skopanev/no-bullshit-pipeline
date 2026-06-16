@@ -69,6 +69,9 @@ fluidaudio-sidecar/.swiftpm/
 __pycache__/
 *.pyc
 
+# dmgbuild venv (bootstrapped by build.sh for the release DMG layout)
+.venv-build/
+
 # HLTM agent
 .hltm
 .hltm-loop
@@ -91,3 +94,7 @@ apple-speech-sidecar/.build/
 # diffs after every codesign and bloats history.
 src-tauri/binaries/*-aarch64-apple-darwin
 src-tauri/binaries/*-x86_64-apple-darwin
+.medulla/logs
+.medulla/human.md
+.medulla/medulla
+.medulla/scripts

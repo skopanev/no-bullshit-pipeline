@@ -59,19 +59,22 @@ DMG_PATH="builds/${NAME}_v${VERSION}.dmg"
 hdiutil detach "/Volumes/$NAME" >/dev/null 2>&1 || true
 rm -f "$DMG_PATH"
 
-create-dmg \
-  --volname "$NAME" \
-  --background "src-tauri/dmg-assets/background.png" \
-  --window-pos 200 120 \
-  --window-size 820 520 \
-  --icon-size 160 \
-  --text-size 14 \
-  --icon "$NAME.app" 220 230 \
-  --app-drop-link 600 230 \
-  --hide-extension "$NAME.app" \
-  --no-internet-enable \
-  "$DMG_PATH" \
-  "$APP_PATH"
+# dmgbuild, not create-dmg: create-dmg drives Finder via AppleScript to set the
+# window layout, which on recent macOS intermittently fails to apply the icon
+# size + background before the volume unmounts (→ tiny icons, white background —
+# the "waited 1 seconds for .DS_STORE" path). dmgbuild writes the .DS_Store
+# directly, so the layout is deterministic. Self-bootstraps a venv so a fresh
+# checkout just works; layout lives in src-tauri/dmg-assets/dmg-settings.py.
+if [ ! -x .venv-build/bin/dmgbuild ]; then
+  echo "    Bootstrapping dmgbuild venv..."
+  python3 -m venv .venv-build
+  .venv-build/bin/pip install --quiet dmgbuild
+fi
+.venv-build/bin/dmgbuild \
+  -s src-tauri/dmg-assets/dmg-settings.py \
+  -D app="$APP_PATH" \
+  "$NAME" \
+  "$DMG_PATH"
 echo "    DMG created: $DMG_PATH"
 
 echo "==> Notarizing DMG..."
