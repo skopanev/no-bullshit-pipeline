@@ -134,194 +134,6 @@ impl DictationState {
     }
 }
 
-/// Candidate dirs where FluidAudio caches the Parakeet v3 model files, mirroring
-/// the sidecar's own path (`~/Library/Application Support/FluidAudio/Models/...`,
-/// see fluidaudio-sidecar `modelsAreCached`, which accepts BOTH the current
-/// `parakeet-tdt-0.6b-v3` and the legacy `…-coreml` layout). We warm both
-/// because we can't cheaply know which one FluidAudio will resolve at load time;
-/// the missing one is just a no-op `read_dir`. The slow `loadFromCache` is only a
-/// read of these files, so warming them into the page cache is what makes a cold
-/// dictation fast.
-fn parakeet_model_dirs() -> Vec<std::path::PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    let base = std::path::PathBuf::from(home).join("Library/Application Support/FluidAudio/Models");
-    ["parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-coreml"]
-        .iter()
-        .map(|name| base.join(name))
-        .collect()
-}
-
-/// Force a file's pages resident in the OS page cache by mapping it read-only
-/// and touching one byte per page. File-backed + read-only ⇒ the pages live in
-/// the shared unified buffer cache (no anonymous/per-process copy), and they
-/// survive this function's `munmap` — so the next sidecar's `loadFromCache`
-/// reads from RAM instead of disk. `mincore` lets us skip files already fully
-/// resident (no I/O, microseconds). Best-effort: any failure is ignored.
-#[allow(deprecated)]
-fn prefetch_file(path: &std::path::Path) -> u64 {
-    use std::os::unix::io::AsRawFd;
-    let Ok(file) = std::fs::File::open(path) else {
-        return 0;
-    };
-    let Ok(meta) = file.metadata() else { return 0 };
-    let len = meta.len() as usize;
-    if len == 0 {
-        return 0;
-    }
-    // sysconf can't really fail for _SC_PAGESIZE on macOS, but guard against a
-    // <=0 return so div_ceil below can't divide by zero.
-    let page = (unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize).max(4096);
-    unsafe {
-        let addr = libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ,
-            libc::MAP_SHARED,
-            file.as_raw_fd(),
-            0,
-        );
-        if addr == libc::MAP_FAILED {
-            return 0;
-        }
-        // Skip the touch loop if every page is already resident (warm cache).
-        let n_pages = len.div_ceil(page);
-        let mut vec = vec![0u8; n_pages];
-        let resident = libc::mincore(addr, len, vec.as_mut_ptr() as *mut _) == 0
-            && vec.iter().all(|b| b & 1 == 1);
-        if !resident {
-            // Hint async read-ahead, then force-fault every page in synchronously
-            // (this runs on a blocking thread during recording — blocking is fine).
-            libc::madvise(addr, len, libc::MADV_WILLNEED);
-            let mut sum: u8 = 0;
-            let mut off = 0;
-            while off < len {
-                sum = sum.wrapping_add(*(addr as *const u8).add(off));
-                off += page;
-            }
-            std::hint::black_box(sum);
-        }
-        libc::munmap(addr, len);
-    }
-    len as u64
-}
-
-/// The CoreML bundles Quick Dictate actually loads (`--no-diarize`, so the
-/// diarizer is never touched). Names match the sidecar's own cache check
-/// (fluidaudio-sidecar `modelsAreCached`). Warming only these keeps the page
-/// footprint to the real ASR working set instead of the whole repo.
-const REQUIRED_BUNDLES: [&str; 4] = [
-    "Preprocessor.mlmodelc",
-    "Encoder.mlmodelc",
-    "Decoder.mlmodelc",
-    "JointDecisionv3.mlmodelc",
-];
-
-/// Recursively warm every file under `dir`. Returns bytes processed.
-fn prefetch_dir(dir: &std::path::Path) -> u64 {
-    let mut total = 0u64;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(path),
-                Ok(ft) if ft.is_file() => total += prefetch_file(&path),
-                _ => {}
-            }
-        }
-    }
-    total
-}
-
-/// Warm the Parakeet ASR weight files into the page cache. Surgical: only the
-/// four `.mlmodelc` bundles the dictation path loads, and only the first model
-/// layout that actually contains them (so we don't double-warm the legacy
-/// `-coreml` copy when both are on disk). Returns total bytes processed.
-fn prefetch_model_pages() -> u64 {
-    for dir in parakeet_model_dirs() {
-        let bundles: Vec<_> = REQUIRED_BUNDLES
-            .iter()
-            .map(|b| dir.join(b))
-            .filter(|p| p.is_dir())
-            .collect();
-        if bundles.is_empty() {
-            continue;
-        }
-        let total: u64 = bundles.iter().map(|b| prefetch_dir(b)).sum();
-        if total > 0 {
-            return total;
-        }
-    }
-    0
-}
-
-/// Warm the model into the page cache while the user speaks. Replaces the old
-/// "spawn a throwaway sidecar" approach (which forked a process, ran CoreML +
-/// inference on silence, allocated ~600 MB anonymous, and could orphan on Esc):
-/// this just maps the weight files and touches their pages in-process on a
-/// blocking thread. No sidecar, no anonymous copy, no DICT_DIAG noise, nothing
-/// to abort. Gated to FluidAudio (Parakeet) — the one heavy file-loaded engine
-/// whose cold `loadFromCache` is the stall; Apple Speech is OS-managed and
-/// Qwen3 loads into anonymous memory (warming files wouldn't help and the spike
-/// hurts low-RAM). Skipped under critical memory pressure, where warming would
-/// just thrash the compressor for pages the kernel reclaims as fast as we touch.
-fn prewarm_page_cache() {
-    let settings = load_settings();
-    if !settings.dictation.enabled
-        || !matches!(
-            settings.transcription.provider,
-            TranscriptionProvider::FluidAudio
-        )
-    {
-        return;
-    }
-    // Skip warming only when the machine genuinely can't spare it: critical
-    // pressure, OR less reclaimable memory than the working set we'd pull in.
-    // We deliberately DO warm at `warning(2)` — the telemetry shows the cold
-    // stall happens there and the warmed file pages survive long enough to help
-    // (clean file-backed pages are cheap for the kernel to reclaim, not
-    // compressor work). The free-MB floor catches the pathological low-RAM box
-    // that reports warning but is truly out of headroom.
-    if read_sysctl_i32("kern.memorystatus_vm_pressure_level") == Some(4) {
-        log::info!("dictation: prewarm skipped — memory pressure critical");
-        return;
-    }
-    if let Some(free) = free_memory_mb()
-        && free < 512
-    {
-        log::info!("dictation: prewarm skipped — only {} MB reclaimable", free);
-        return;
-    }
-    // Dedup: a stop→start toggle can fire a second prewarm while the first is
-    // still faulting pages. spawn_blocking can't be aborted, so guard against
-    // stacking redundant tasks (mincore would make them cheap, but a guard is
-    // cleaner and keeps the blocking pool free).
-    if PREWARM_IN_FLIGHT.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    tauri::async_runtime::spawn_blocking(|| {
-        let t0 = std::time::Instant::now();
-        let bytes = prefetch_model_pages();
-        PREWARM_IN_FLIGHT.store(false, Ordering::Release);
-        if bytes > 0 {
-            log::info!(
-                "dictation: prewarmed {:.0} MB of model pages in {:?}",
-                bytes as f64 / 1e6,
-                t0.elapsed()
-            );
-        }
-    });
-}
-
-/// True while a `prewarm_page_cache` blocking task is faulting pages — prevents
-/// rapid hotkey toggles from stacking redundant prefetch tasks.
-static PREWARM_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
 /// Claim a fresh delivery generation. Bumping the counter also supersedes any
 /// older in-flight delivery (its `is_current` checks will now fail), so this
 /// doubles as "start mine, cancel anyone older". Returns the claimed value.
@@ -383,54 +195,32 @@ impl Drop for SidecarKiller {
     }
 }
 
-/// Prewarm the on-device model at app startup and on wake.
+/// Prewarm the on-device model once at app startup and on wake.
 ///
-/// Two distinct costs hide behind a cold dictation: the one-time
-/// `.mlpackage → .mlmodelc` CoreML compile / first download (paid once ever,
-/// persists on disk), and the recurring cost of reading the ~461 MB of weight
-/// files back into the OS page cache after eviction. We pay them with different
-/// mechanisms (panel decision):
-///
-/// - **FluidAudio, model already on disk:** just warm the file pages
-///   in-process (`prefetch_model_pages`) — no fork, no CoreML, no ~600 MB
-///   anonymous spike. This is what fires on every subsequent startup/wake.
-/// - **FluidAudio, model NOT yet present:** spawn the sidecar once over silence
-///   to trigger the download + compile, paying that cost up front.
-/// - **Qwen3 / Apple Speech / cloud:** NOT warmed at startup/wake. Qwen3 loads
-///   into anonymous memory (file-warm wouldn't help, and the spike hurts
-///   low-RAM machines on every wake); Apple Speech is OS-daemon-managed; cloud
-///   has nothing local. They warm lazily on first real use.
+/// Spawns one throwaway sidecar over a sliver of silence so the first real
+/// dictation doesn't eat the cold-start (CoreML compile on first launch, then
+/// the model read into the OS page cache). Fires only at startup/wake — NOT per
+/// dictation. Cloud / unsupported engines have no local model to warm.
 pub fn prewarm_models(app: &AppHandle) {
-    let settings = load_settings();
-    if !settings.dictation.enabled
-        || !matches!(
-            settings.transcription.provider,
-            TranscriptionProvider::FluidAudio
-        )
-    {
-        return;
-    }
-
-    // "Already compiled/downloaded?" = the required .mlmodelc bundles exist.
-    let compiled = parakeet_model_dirs()
-        .iter()
-        .any(|dir| REQUIRED_BUNDLES.iter().all(|b| dir.join(b).is_dir()));
-
-    if compiled {
-        // Light path: warm the file pages in-process. Reuses the record-start
-        // gating (pressure/free-MB/dedup) so a wake under pressure won't thrash.
-        prewarm_page_cache();
-        return;
-    }
-
-    // Heavy path, once: model not on disk yet — spawn the sidecar over silence
-    // to pull + compile it. After this the `compiled` branch takes over.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let settings = load_settings();
+        if !settings.dictation.enabled {
+            return;
+        }
+        let provider = settings.transcription.provider.clone();
+        if !matches!(
+            provider,
+            TranscriptionProvider::FluidAudio
+                | TranscriptionProvider::Qwen3
+                | TranscriptionProvider::AppleSpeech
+        ) {
+            return;
+        }
         let silence = vec![0.0f32; (TARGET_RATE as usize) * 3 / 10];
         let t0 = std::time::Instant::now();
         match transcribe(&app, &silence).await {
-            Ok(_) => log::info!("dictation: first-run model prewarm in {:?}", t0.elapsed()),
+            Ok(_) => log::info!("dictation: prewarmed {:?} in {:?}", provider, t0.elapsed()),
             Err(e) => log::warn!("dictation: prewarm failed (non-fatal): {}", e),
         }
     });
@@ -719,14 +509,6 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // active monitor first.
     crate::hud::reposition(app);
     emit_status(app, "recording", Some(&shortcut.id), None);
-
-    // Warm the model into the page cache NOW, in parallel with recording: the
-    // user is about to speak for several seconds, and that free window is enough
-    // to read the ~600 MB weight files into the OS page cache so the real
-    // transcription at stop hits a warm `loadFromCache` instead of a 15 s cold
-    // disk read. In-process page touch (mincore-gated, skipped if already warm),
-    // not a sidecar — fire-and-forget, nothing to await or abort.
-    prewarm_page_cache();
 
     // Fresh meter state per session — last shortcut's mic/level shouldn't bias
     // the adaptive gain of the next one.
