@@ -6,24 +6,14 @@
 //! research + ensemble panel: CoreML caches its per-(mlmodelc path × compute
 //! unit × MLModelConfiguration) ANE/Metal specialization in *purgeable* VM
 //! memory, and macOS evicts that cache during sleep / under memory pressure.
-//! Because each Quick Dictate spawns a fresh one-shot sidecar
-//! (`fluidaudio-sidecar`), the next dictation after wake pays the full
+//! Without resident mode, each Quick Dictate spawns a fresh one-shot sidecar
+//! (`fluidaudio-sidecar`), so the next dictation after wake can pay the full
 //! re-specialization cost on first inference.
 //!
 //! **What this does.** Subscribes to `NSWorkspaceDidWakeNotification` on
-//! `[NSWorkspace.sharedWorkspace.notificationCenter]`. On fire, calls the
-//! existing `dictation::prewarm_models()` — which spawns a throwaway sidecar
-//! to run a 0.3s silence inference. That repopulates the on-disk +
-//! purgeable specialization cache before the user touches their hotkey.
-//!
-//! **Why this isn't a daemon.** Daemon (keep one sidecar alive forever)
-//! costs ~600 MB resident RSS permanently and a 250–350 LOC refactor. This
-//! wake-prewarm is ~50 LOC, costs zero idle RAM, and validates the
-//! "sleep purges the cache" hypothesis cheaply. If the post-wake cliff
-//! persists with this in place, the existing `TIMING:asrModels.loadModels`
-//! / `TIMING:asrManager.transcribe` stderr lines from the next slow run
-//! tell us which layer to attack next — and *then* we have data for daemon
-//! vs other approaches.
+//! `[NSWorkspace.sharedWorkspace.notificationCenter]`. On fire, it verifies
+//! the resident Parakeet supervisor when enabled. Other engines keep the
+//! existing throwaway silence prewarm.
 //!
 //! **Debounce.** macOS occasionally fires `didWakeNotification` 2–3 times
 //! within seconds on a single lid open (especially with external monitors
@@ -89,10 +79,19 @@ pub fn install(app_handle: tauri::AppHandle) {
             return;
         }
         LAST_WAKE_PREWARM_AT.store(now, Ordering::Release);
-        log::info!("wake_observer: didWake — re-prewarming ASR (post-sleep cache refill)");
-        // `prewarm_models` spawns its own async task internally and returns
-        // immediately — block stays cheap to call from the notification queue.
-        crate::dictation::prewarm_models(&handle_for_block);
+        let settings = crate::config::load_settings();
+        if crate::parakeet_worker::configured(&settings) {
+            log::info!("wake_observer: didWake — verifying and warming resident Parakeet");
+            let app = handle_for_block.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::parakeet_worker::verify_after_wake(&app).await;
+            });
+        } else {
+            log::info!("wake_observer: didWake — re-prewarming ASR (post-sleep cache refill)");
+            // `prewarm_models` spawns its own async task internally and returns
+            // immediately — block stays cheap to call from the notification queue.
+            crate::dictation::prewarm_models(&handle_for_block);
+        }
     });
 
     unsafe {

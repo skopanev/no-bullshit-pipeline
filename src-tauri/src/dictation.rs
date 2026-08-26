@@ -9,7 +9,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Split};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -17,6 +17,8 @@ use crate::config::{DictationShortcut, StepType, TranscriptionProvider, load_set
 use crate::pipelines::load_pipelines;
 
 const TARGET_RATE: u32 = 16_000;
+pub(crate) const QUICK_DICTATE_TRANSCRIPTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(600);
 
 /// Hard ceiling on the in-memory mic capture buffer. A Quick Dictate
 /// session is meant to last seconds. If a stop path ever fails to fire
@@ -41,6 +43,7 @@ fn append_capped(buf: &mut Vec<f32>, data: &[f32]) {
 
 pub struct DictationState {
     pub is_active: Arc<AtomicBool>,
+    asr_reserved: Arc<AtomicUsize>,
     inner: Mutex<Option<Session>>,
     pub last_registration: Mutex<Vec<crate::ShortcutRegistration>>,
     /// Handle to the in-flight post-capture pipeline (transcribe → LLM →
@@ -108,6 +111,14 @@ struct Session {
         Option<tauri::async_runtime::JoinHandle<Option<crate::system_audio::SystemAudioRecorder>>>,
 }
 
+struct AsrReservation(Arc<AtomicUsize>);
+
+impl Drop for AsrReservation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Coefficient applied to the current system output volume during a session.
 /// 0.4 = duck to 40% of current.
 const VOLUME_DUCK_RATIO: f32 = 0.4;
@@ -117,15 +128,17 @@ const VOLUME_DUCK_RATIO: f32 = 0.4;
 /// any device-specific gain constant. Reset at session start.
 static PEAK_TRACKER: AtomicU32 = AtomicU32::new(0);
 
-// SAFETY: cpal::Stream is !Send on macOS due to PhantomData<*mut ()>. The stream
-// is created, kept alive in the Mutex, and dropped on stop — never moved across
-// threads. All access serialised by the outer Mutex.
+// SAFETY: cpal's macOS stream wrapper is !Send at the platform enum boundary,
+// while its CoreAudio implementation stores the AudioUnit behind Arc<Mutex<_>>
+// and its monitor is Send + Sync. Session ownership is removed from the state
+// mutex before transfer; capture and teardown never access it concurrently.
 unsafe impl Send for Session {}
 
 impl DictationState {
     pub fn new() -> Self {
         Self {
             is_active: Arc::new(AtomicBool::new(false)),
+            asr_reserved: Arc::new(AtomicUsize::new(0)),
             inner: Mutex::new(None),
             last_registration: Mutex::new(Vec::new()),
             pipeline: Mutex::new(None),
@@ -134,22 +147,41 @@ impl DictationState {
     }
 }
 
-/// Claim a fresh delivery generation. Bumping the counter also supersedes any
-/// older in-flight delivery (its `is_current` checks will now fail), so this
-/// doubles as "start mine, cancel anyone older". Returns the claimed value.
-fn claim_generation(app: &AppHandle) -> u64 {
+pub(crate) fn asr_reserved(app: &AppHandle) -> bool {
     app.state::<DictationState>()
-        .generation
-        .fetch_add(1, Ordering::AcqRel)
-        + 1
+        .asr_reserved
+        .load(Ordering::Acquire)
+        > 0
 }
 
-/// Supersede the current delivery without starting a new one — i.e. cancel.
-/// Bumps the counter so the live pipeline's generation is no longer current.
-fn supersede(app: &AppHandle) {
+pub(crate) fn capture_active(app: &AppHandle) -> bool {
     app.state::<DictationState>()
-        .generation
-        .fetch_add(1, Ordering::AcqRel);
+        .is_active
+        .load(Ordering::Acquire)
+}
+
+/// Claim a fresh delivery generation and detach the superseded pipeline while
+/// holding the same ownership lock. The old handle is aborted after unlocking,
+/// so it can never be confused with a pipeline installed by the new owner.
+fn claim_generation(app: &AppHandle) -> u64 {
+    let state = app.state::<DictationState>();
+    let (generation, old_pipeline) = {
+        let _ownership = state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let old_pipeline = state
+            .pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        (generation, old_pipeline)
+    };
+    if let Some(handle) = old_pipeline {
+        handle.abort();
+    }
+    generation
 }
 
 /// True while `gen` is still the live delivery generation. Goes false the
@@ -163,23 +195,26 @@ fn is_current(app: &AppHandle, generation: u64) -> bool {
         == generation
 }
 
-/// Abort the in-flight stop pipeline, if any. Aborting drops the task's future
-/// at its current `.await` point, which drops the sidecar guard (killing the
-/// transcription process) and stops the flow before it can paste. Returns true
-/// if a handle was present. Safe to call when none is running (no-op).
-fn abort_pipeline(app: &AppHandle) -> bool {
-    let handle = app
-        .state::<DictationState>()
+fn install_pipeline_if_current(
+    app: &AppHandle,
+    generation: u64,
+    handle: tauri::async_runtime::JoinHandle<()>,
+) -> bool {
+    let owner_state = app.state::<DictationState>();
+    let _ownership = owner_state
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if owner_state.generation.load(Ordering::Acquire) != generation {
+        handle.abort();
+        return false;
+    }
+    let mut pipeline = owner_state
         .pipeline
         .lock()
-        .ok()
-        .and_then(|mut g| g.take());
-    if let Some(h) = handle {
-        h.abort();
-        true
-    } else {
-        false
-    }
+        .unwrap_or_else(|error| error.into_inner());
+    *pipeline = Some(handle);
+    true
 }
 
 /// Kills the wrapped transcription sidecar on drop. The pipeline task may be
@@ -197,14 +232,18 @@ impl Drop for SidecarKiller {
 
 /// Prewarm the on-device model once at app startup and on wake.
 ///
-/// Spawns one throwaway sidecar over a sliver of silence so the first real
-/// dictation doesn't eat the cold-start (CoreML compile on first launch, then
-/// the model read into the OS page cache). Fires only at startup/wake — NOT per
-/// dictation. Cloud / unsupported engines have no local model to warm.
+/// Runs a sliver of silence through the selected on-device engine so the first
+/// real dictation doesn't eat the cold-start. Resident Parakeet uses its
+/// existing worker, which verifies actual CoreML inference instead of process
+/// liveness. Cloud / unsupported engines have no local model to warm.
 pub fn prewarm_models(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let settings = load_settings();
+        if crate::parakeet_worker::configured(&settings) {
+            let _ = crate::parakeet_worker::warmup::run(&app, "startup").await;
+            return;
+        }
         if !settings.dictation.enabled {
             return;
         }
@@ -244,17 +283,44 @@ pub struct DictationStatus {
     pub state: String,
     pub shortcut_id: Option<String>,
     pub message: Option<String>,
+    pub generation: u64,
 }
 
-fn emit_status(app: &AppHandle, state: &str, shortcut_id: Option<&str>, message: Option<String>) {
+fn emit_status(
+    app: &AppHandle,
+    generation: u64,
+    state: &str,
+    shortcut_id: Option<&str>,
+    message: Option<String>,
+) {
     let _ = app.emit(
         "dictation_status",
         DictationStatus {
             state: state.to_string(),
             shortcut_id: shortcut_id.map(|s| s.to_string()),
             message,
+            generation,
         },
     );
+}
+
+fn emit_status_if_current(
+    app: &AppHandle,
+    generation: u64,
+    state: &str,
+    shortcut_id: Option<&str>,
+    message: Option<String>,
+) -> bool {
+    let owner_state = app.state::<DictationState>();
+    let _ownership = owner_state
+        .inner
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if owner_state.generation.load(Ordering::Acquire) != generation {
+        return false;
+    }
+    emit_status(app, generation, state, shortcut_id, message);
+    true
 }
 
 fn find_shortcut(shortcut_id: &str) -> Option<DictationShortcut> {
@@ -400,19 +466,46 @@ fn open_mic_stream(
 /// `samples` is final and no thread is left spinning. Idempotent (both the
 /// stream and the handle are `take`n). Shared by the stop, cancel, and
 /// start-abort paths so the teardown order lives in exactly one place.
-fn teardown_capture(session: &mut Session) {
+#[derive(Default)]
+struct CaptureTeardownTiming {
+    pause: std::time::Duration,
+    drop_stream: std::time::Duration,
+    join_drain: std::time::Duration,
+    total: std::time::Duration,
+}
+
+fn teardown_capture(session: &mut Session) -> CaptureTeardownTiming {
+    let total_started = std::time::Instant::now();
+    let mut timing = CaptureTeardownTiming::default();
     // Pause BEFORE drop: on macOS `cpal::Stream::Drop` doesn't block on the HAL
     // thread, so the callback can keep pushing for an unbounded time after drop;
     // pause() stops it synchronously so the drain thread can actually reach an
     // empty ring and exit.
+    let pause_started = std::time::Instant::now();
     if let Some(ref s) = session.stream {
         let _ = s.pause();
     }
+    timing.pause = pause_started.elapsed();
+    let drop_started = std::time::Instant::now();
     drop(session.stream.take());
+    timing.drop_stream = drop_started.elapsed();
     session.drain_stop.store(true, Ordering::Relaxed);
+    let join_started = std::time::Instant::now();
     if let Some(handle) = session.drain_thread.take() {
         let _ = handle.join();
     }
+    timing.join_drain = join_started.elapsed();
+    timing.total = total_started.elapsed();
+    timing
+}
+
+fn spawn_capture_teardown(
+    mut session: Session,
+) -> tauri::async_runtime::JoinHandle<(Session, CaptureTeardownTiming)> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let timing = teardown_capture(&mut session);
+        (session, timing)
+    })
 }
 
 /// Decide whether to duck system output for this session, snapshot the pre-duck
@@ -463,28 +556,58 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // and start a second concurrent setup — spawning duplicate sidecars and
     // overwriting the in-flight Session.
     let active_flag = state.is_active.clone();
-    if active_flag
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        log::warn!("dictation: start_inner rejected — already active");
-        return Err("Dictation already active".into());
+    let (generation, old_pipeline) = {
+        // Stop/cancel also release `is_active` under this lock. Claim the bool
+        // and its generation together so cancellation cannot land between them.
+        // Detach the superseded pipeline here too: taking it later could abort
+        // a handle already installed by another owner.
+        let _ownership = state
+            .inner
+            .lock()
+            .map_err(|error| format!("state lock: {error}"))?;
+        if active_flag
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            log::warn!("dictation: start_inner rejected — already active");
+            return Err("Dictation already active".into());
+        }
+        let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let old_pipeline = state
+            .pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        (generation, old_pipeline)
+    };
+    if let Some(handle) = old_pipeline {
+        handle.abort();
     }
     // Reset the flag if we bail out before successfully installing the
     // Session in state. RAII so we don't have to remember on every `?`.
     struct ActiveGuard {
-        flag: Arc<AtomicBool>,
+        app: AppHandle,
+        owner: u64,
         commit: bool,
     }
     impl Drop for ActiveGuard {
         fn drop(&mut self) {
-            if !self.commit {
-                self.flag.store(false, Ordering::Release);
+            if self.commit {
+                return;
+            }
+            let state = self.app.state::<DictationState>();
+            let _ownership = state
+                .inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.generation.load(Ordering::Acquire) == self.owner {
+                state.is_active.store(false, Ordering::Release);
             }
         }
     }
     let mut active_guard = ActiveGuard {
-        flag: active_flag,
+        app: app.clone(),
+        owner: generation,
         commit: false,
     };
 
@@ -492,12 +615,11 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // still-running pipeline from the previous dictation (its `is_active` was
     // already cleared at stop, so it could otherwise paste stale text into this
     // new context): the bump makes the old generation non-current, so the old
-    // pipeline bails at its next boundary check. We also abort it to kill its
-    // sidecar promptly — but correctness rests on the generation, not the
-    // (cooperative, await-only) abort. No reset race: the counter only ever
-    // increments, so the old delivery can never observe itself as "current".
-    let generation = claim_generation(app);
-    abort_pipeline(app);
+    // pipeline bails at its next boundary check. Its handle was detached under
+    // the same ownership lock above and is aborted to kill its sidecar promptly
+    // — but correctness rests on the generation, not the cooperative abort. No
+    // reset race: the counter only ever increments, so the old delivery can
+    // never observe itself as "current".
 
     let shortcut = find_shortcut(shortcut_id)
         .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
@@ -508,7 +630,9 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // user sees the listening UI the instant they press the key. Land it on the
     // active monitor first.
     crate::hud::reposition(app);
-    emit_status(app, "recording", Some(&shortcut.id), None);
+    if !emit_status_if_current(app, generation, "recording", Some(&shortcut.id), None) {
+        return Ok(());
+    }
 
     // Fresh meter state per session — last shortcut's mic/level shouldn't bias
     // the adaptive gain of the next one.
@@ -576,12 +700,24 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     {
         Ok(Ok(setup)) => setup,
         Ok(Err(e)) => {
-            emit_status(app, "error", Some(&shortcut.id), Some(e.clone()));
+            emit_status_if_current(
+                app,
+                generation,
+                "error",
+                Some(&shortcut.id),
+                Some(e.clone()),
+            );
             return Err(e);
         }
         Err(e) => {
             let msg = format!("mic setup task: {}", e);
-            emit_status(app, "error", Some(&shortcut.id), Some(msg.clone()));
+            emit_status_if_current(
+                app,
+                generation,
+                "error",
+                Some(&shortcut.id),
+                Some(msg.clone()),
+            );
             return Err(msg);
         }
     };
@@ -611,12 +747,7 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
             .unwrap_or(None)
     };
 
-    // While dictation is live, hijack Escape to cancel the session — the user
-    // can wave it off without their text leaking out as a paste. The shortcut
-    // is unregistered as soon as the session ends (stop or cancel).
-    register_escape_cancel(app);
-
-    let mut session = Session {
+    let session = Session {
         shortcut_id: shortcut.id.clone(),
         generation,
         samples,
@@ -640,7 +771,7 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
         // taking the still-empty session slot. If that happened, DON'T install an
         // orphaned session and start a tray pulse that no stop path will ever
         // clear — that's the "blinking red after wake" bug. Tear down instead.
-        if !state.is_active.load(Ordering::Relaxed) {
+        if !state.is_active.load(Ordering::Relaxed) || !is_current(app, generation) {
             drop(guard);
             log::warn!(
                 "dictation: '{}' startup aborted — cancelled while opening mic",
@@ -649,16 +780,24 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
             if let Some(v) = pre_duck_volume {
                 restore_system_volume_to(v);
             }
-            unregister_escape_cancel(app);
+            // Cancel already released A's handler before allowing another
+            // generation to start. Do not unregister here: it may now belong
+            // to B.
             // Stop the stream AND join the drain thread before the session drops
             // — otherwise the drain thread spins forever (it only exits once
             // drain_stop is set and the ring is empty).
-            teardown_capture(&mut session);
+            let _ = spawn_capture_teardown(session)
+                .await
+                .map_err(|error| format!("mic teardown task failed: {error}"))?;
             // Leave is_active as-is (cancel owns it now). Commit so the guard's
             // Drop doesn't touch the flag.
             active_guard.commit = true;
             return Ok(());
         }
+        // Register Escape only after the final ownership check, while stop and
+        // cancel are excluded by the same lock. A quick stop during mic setup
+        // can therefore never leave a late global Escape hook behind.
+        register_escape_cancel(app);
         *guard = Some(session);
         // Start the pulse INSIDE the critical section — while is_active is still
         // true and the session is installed under this same lock. cancel_inner /
@@ -682,29 +821,54 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
 }
 
 pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
-    let session = {
+    let stopped = {
         let state = app.state::<DictationState>();
         let mut guard = state
             .inner
             .lock()
             .map_err(|e| format!("state lock: {}", e))?;
-        let s = guard.take();
-        state.is_active.store(false, Ordering::Relaxed);
-        s
-    };
-
-    // Capture is done — stop the tray-icon blink (transcribe/paste runs after).
-    crate::stop_tray_pulse();
-
-    let mut session = match session {
-        Some(s) => s,
-        None => {
-            emit_status(app, "idle", None, None);
-            return Ok(String::new());
+        let was_active = state.is_active.load(Ordering::Acquire);
+        let stopped = guard.take().map(|session| {
+            let shortcut_id = session.shortcut_id.clone();
+            state.asr_reserved.fetch_add(1, Ordering::AcqRel);
+            log::info!("dictation: stop requested shortcut={shortcut_id}");
+            // Complete the old HUD/pulse handoff before releasing active
+            // ownership. Any new start happens after this and wins the UI.
+            crate::stop_tray_pulse();
+            emit_status(
+                app,
+                session.generation,
+                "transcribing",
+                Some(&shortcut_id),
+                None,
+            );
+            (
+                session,
+                AsrReservation(state.asr_reserved.clone()),
+                shortcut_id,
+            )
+        });
+        if stopped.is_none() && was_active {
+            // Stop landed while start_inner was still opening the mic and had
+            // not installed its Session. Supersede that startup so its late
+            // success/error path cannot re-show the HUD or register Escape.
+            let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            crate::stop_tray_pulse();
+            emit_status(app, generation, "idle", None, None);
         }
+        state.is_active.store(false, Ordering::Release);
+        stopped
     };
 
-    let shortcut_id = session.shortcut_id.clone();
+    let (session, asr_reservation, shortcut_id) = match stopped {
+        Some(stopped) => stopped,
+        None => return Ok(String::new()),
+    };
+    let stop_generation = session.generation;
+
+    // Stop no longer leaves the HUD claiming that recording is active while
+    // CoreAudio tears down. The phase remains transcribing through conversion
+    // and ASR, so there is no extra UI state or wording to maintain.
     // ESC stays registered through the pipeline so the user can dismiss the
     // HUD at any time (transcribing/processing/pasting/error display). It's
     // released at the natural end of stop_inner or by force_hide_hud.
@@ -717,7 +881,38 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     // Pause + drop the stream, then stop and join the drain thread. Joining is
     // what guarantees the ring's final tail is in `samples` and the drain's Arc
     // clone is released — no more capture buffers stuck alive across sessions.
-    teardown_capture(&mut session);
+    let teardown_started = std::time::Instant::now();
+    let teardown = spawn_capture_teardown(session);
+    tokio::pin!(teardown);
+    let teardown_result = tokio::select! {
+        result = &mut teardown => result,
+        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+            log::warn!("dictation: mic teardown still running after 2s shortcut={shortcut_id}");
+            teardown.await
+        }
+    };
+    let (mut session, teardown_timing) = match teardown_result {
+        Ok(result) => result,
+        Err(error) => {
+            log::error!("dictation: mic teardown task failed shortcut={shortcut_id}: {error}");
+            emit_status_if_current(
+                app,
+                stop_generation,
+                "idle",
+                Some(&shortcut_id),
+                Some("Audio capture cleanup failed".into()),
+            );
+            return Err(format!("mic teardown task failed: {error}"));
+        }
+    };
+    log::info!(
+        "dictation: stop phase mic_teardown total={:?} pause={:?} drop={:?} join={:?} wall={:?}",
+        teardown_timing.total,
+        teardown_timing.pause,
+        teardown_timing.drop_stream,
+        teardown_timing.join_drain,
+        teardown_started.elapsed()
+    );
 
     // Stop the parallel system-audio tap (if any). Its `stop()` joins the
     // capture thread, so by the time it returns SYSTEM_BUFFER holds the full
@@ -776,19 +971,18 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
             channels,
             sample_rate,
             generation,
+            asr_reservation,
         )
         .await;
     });
-    if let Ok(mut g) = app.state::<DictationState>().pipeline.lock() {
-        *g = Some(handle);
-    }
+    install_pipeline_if_current(app, generation, handle);
     Ok(String::new())
 }
 
 /// Detached tail of `stop_inner`: finalize the transcript (streaming finish or
 /// batch convert+transcribe) and deliver it via `process_and_deliver`. Runs in
 /// its own task so Esc can abort the whole thing mid-flight — see the spawn site
-/// in `stop_inner` and `abort_pipeline`.
+/// in `stop_inner` and generation supersession.
 #[allow(clippy::too_many_arguments)]
 async fn run_stop_pipeline(
     app: &AppHandle,
@@ -799,13 +993,13 @@ async fn run_stop_pipeline(
     channels: u16,
     sample_rate: u32,
     generation: u64,
+    asr_reservation: AsrReservation,
 ) -> Result<String, String> {
     // Entry guard: Esc may have fired during stop_inner's teardown limbo
     // (is_active already false, no handle to abort yet), or a newer delivery may
     // have started. Either bumps the generation. Honour it before doing any work
     // — otherwise we'd transcribe + paste despite the cancel/supersession.
     if !is_current(app, generation) {
-        emit_status(app, "idle", Some(&shortcut_id), Some("Cancelled".into()));
         return Ok(String::new());
     }
 
@@ -813,26 +1007,33 @@ async fn run_stop_pipeline(
     // flush + emit its final transcript. Bypasses the entire batch
     // normalize/resample/transcribe pipeline.
     if let Some(streaming) = streaming {
-        emit_status(
+        if !emit_status_if_current(
             app,
+            generation,
             "transcribing",
             Some(&shortcut_id),
             Some("Finalizing live transcript".into()),
-        );
+        ) {
+            return Ok(String::new());
+        }
         let t0 = std::time::Instant::now();
         let final_text = match streaming.finish().await {
             Ok(t) => t,
-            Err(e) => return finish_with_error(app, &shortcut_id, "Transcription failed", e),
+            Err(e) => {
+                return finish_with_error(app, generation, &shortcut_id, "Transcription failed", e);
+            }
         };
         log::info!(
             "dictation: streaming finish {:?} (chars={})",
             t0.elapsed(),
             final_text.len()
         );
+        drop(asr_reservation);
         let trimmed = final_text.trim().to_string();
         if trimmed.is_empty() {
-            emit_status(
+            emit_status_if_current(
                 app,
+                generation,
                 "idle",
                 Some(&shortcut_id),
                 Some("No speech detected".into()),
@@ -844,8 +1045,9 @@ async fn run_stop_pipeline(
     }
 
     if raw_samples.is_empty() {
-        emit_status(
+        emit_status_if_current(
             app,
+            generation,
             "idle",
             Some(&shortcut_id),
             Some("No audio captured".into()),
@@ -859,8 +1061,6 @@ async fn run_stop_pipeline(
         shortcut.name,
         duration_secs
     );
-    emit_status(app, "transcribing", Some(&shortcut_id), None);
-
     // From here on, any error MUST end with an emit_status that takes the
     // HUD out of "transcribing" — otherwise the HUD hangs and the user has
     // to restart nbp. Use `finish_with_error` for every fallible step.
@@ -885,7 +1085,9 @@ async fn run_stop_pipeline(
     } else {
         match resample_mono(&mono, sample_rate, TARGET_RATE) {
             Ok(s) => s,
-            Err(e) => return finish_with_error(app, &shortcut_id, "Resample failed", e),
+            Err(e) => {
+                return finish_with_error(app, generation, &shortcut_id, "Resample failed", e);
+            }
         }
     };
     log::info!(
@@ -899,7 +1101,18 @@ async fn run_stop_pipeline(
     // average to mono, resample to 16 kHz, sum with mic with safe headroom so
     // the loudest combined sample fits in [-1, 1] without clipping.
     let mono_16k = if shortcut.capture_system_audio {
-        mix_in_system_audio(mono_16k)?
+        match mix_in_system_audio(mono_16k) {
+            Ok(samples) => samples,
+            Err(error) => {
+                return finish_with_error(
+                    app,
+                    generation,
+                    &shortcut_id,
+                    "System audio mix failed",
+                    error,
+                );
+            }
+        }
     } else {
         mono_16k
     };
@@ -909,20 +1122,23 @@ async fn run_stop_pipeline(
     // before spawning the sidecar so an Esc during that window doesn't start a
     // transcription that nobody wants.
     if !is_current(app, generation) {
-        emit_status(app, "idle", Some(&shortcut_id), Some("Cancelled".into()));
         return Ok(String::new());
     }
 
     let t3 = std::time::Instant::now();
     let transcript = match transcribe(app, &mono_16k).await {
         Ok(t) => t,
-        Err(e) => return finish_with_error(app, &shortcut_id, "Transcription failed", e),
+        Err(e) => {
+            return finish_with_error(app, generation, &shortcut_id, "Transcription failed", e);
+        }
     };
     log::info!("dictation: transcribe {:?}", t3.elapsed());
+    drop(asr_reservation);
     let trimmed = transcript.trim().to_string();
     if trimmed.is_empty() {
-        emit_status(
+        emit_status_if_current(
             app,
+            generation,
             "idle",
             Some(&shortcut_id),
             Some("No speech detected".into()),
@@ -941,13 +1157,15 @@ async fn run_stop_pipeline(
 /// state and the next hotkey press appears to do nothing.
 fn finish_with_error(
     app: &AppHandle,
+    generation: u64,
     shortcut_id: &str,
     summary: &str,
     err: String,
 ) -> Result<String, String> {
     log::warn!("dictation: {summary} — {err}");
-    emit_status(
+    emit_status_if_current(
         app,
+        generation,
         "error",
         Some(shortcut_id),
         Some(format!("{summary}: {err}")),
@@ -962,15 +1180,23 @@ pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<S
         .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
 
     // Fresh delivery — claim a generation (supersedes any older in-flight
-    // delivery) and abort a prior pipeline's sidecar.
+    // delivery) and abort the prior pipeline's detached handle.
     let generation = claim_generation(app);
-    abort_pipeline(app);
 
     crate::hud::reposition(app);
-    emit_status(app, "reading_clipboard", Some(&shortcut.id), None);
+    if !emit_status_if_current(
+        app,
+        generation,
+        "reading_clipboard",
+        Some(&shortcut.id),
+        None,
+    ) {
+        return Ok(String::new());
+    }
     let text = read_clipboard().map_err(|e| {
-        emit_status(
+        emit_status_if_current(
             app,
+            generation,
             "error",
             Some(&shortcut.id),
             Some(format!("Clipboard read failed: {}", e)),
@@ -979,8 +1205,9 @@ pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<S
     })?;
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
-        emit_status(
+        emit_status_if_current(
             app,
+            generation,
             "idle",
             Some(&shortcut.id),
             Some("Clipboard is empty".into()),
@@ -999,9 +1226,7 @@ pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<S
     let handle = tauri::async_runtime::spawn(async move {
         let _ = process_and_deliver(&app_task, &shortcut, trimmed, None, generation).await;
     });
-    if let Ok(mut g) = app.state::<DictationState>().pipeline.lock() {
-        *g = Some(handle);
-    }
+    install_pipeline_if_current(app, generation, handle);
     Ok(String::new())
 }
 
@@ -1021,7 +1246,6 @@ async fn process_and_deliver(
     // (Esc or a newer dictation) — the pre-paste check below is the paste-safety
     // gate; this one just avoids wasted side effects after a cancel race.
     if !is_current(app, generation) {
-        emit_status(app, "idle", Some(&shortcut_id), Some("Cancelled".into()));
         return Ok(String::new());
     }
 
@@ -1046,17 +1270,23 @@ async fn process_and_deliver(
     }
 
     let final_text = if let Some(ref pipeline_name) = shortcut.pipeline {
-        emit_status(app, "processing", Some(&shortcut_id), None);
+        if !emit_status_if_current(app, generation, "processing", Some(&shortcut_id), None) {
+            return Ok(String::new());
+        }
         match run_text_pipeline(&input_text, pipeline_name).await {
             Ok(processed) => processed,
             Err(e) => {
+                if !is_current(app, generation) {
+                    return Ok(String::new());
+                }
                 log::warn!(
                     "dictation: pipeline '{}' failed: {} — falling back to raw input",
                     pipeline_name,
                     e
                 );
-                emit_status(
+                emit_status_if_current(
                     app,
+                    generation,
                     "pipeline_error",
                     Some(&shortcut_id),
                     Some(format!("Pipeline failed, pasted raw: {}", e)),
@@ -1070,7 +1300,13 @@ async fn process_and_deliver(
 
     let final_trimmed = final_text.trim().to_string();
     if final_trimmed.is_empty() {
-        emit_status(app, "idle", Some(&shortcut_id), Some("Empty output".into()));
+        emit_status_if_current(
+            app,
+            generation,
+            "idle",
+            Some(&shortcut_id),
+            Some("Empty output".into()),
+        );
         return Ok(String::new());
     }
 
@@ -1079,27 +1315,34 @@ async fn process_and_deliver(
     // check makes the cancel authoritative. paste_text re-checks once more after
     // its synchronous settle, right before the keystroke.
     if !is_current(app, generation) {
-        emit_status(app, "idle", Some(&shortcut_id), Some("Cancelled".into()));
         return Ok(String::new());
     }
 
     if shortcut.auto_paste {
-        emit_status(app, "pasting", Some(&shortcut_id), None);
+        if !emit_status_if_current(app, generation, "pasting", Some(&shortcut_id), None) {
+            return Ok(String::new());
+        }
         match paste_text(&final_trimmed, app, generation) {
             Ok(PasteOutcome::Pasted) => {}
             Ok(PasteOutcome::Cancelled) => {
-                emit_status(app, "idle", Some(&shortcut_id), Some("Cancelled".into()));
                 return Ok(String::new());
             }
             Err(PasteError::AccessibilityDenied) => {
                 log::warn!("dictation: Accessibility permission missing — text in clipboard only");
-                emit_status(app, "accessibility_needed", Some(&shortcut_id), None);
+                emit_status_if_current(
+                    app,
+                    generation,
+                    "accessibility_needed",
+                    Some(&shortcut_id),
+                    None,
+                );
                 return Ok(final_trimmed);
             }
             Err(PasteError::Other(e)) => {
                 log::warn!("dictation paste failed: {}", e);
-                emit_status(
+                emit_status_if_current(
                     app,
+                    generation,
                     "error",
                     Some(&shortcut_id),
                     Some(format!("Paste failed: {}", e)),
@@ -1111,7 +1354,7 @@ async fn process_and_deliver(
         log::warn!("dictation clipboard failed: {}", e);
     }
 
-    emit_status(app, "idle", Some(&shortcut_id), None);
+    emit_status_if_current(app, generation, "idle", Some(&shortcut_id), None);
     log::info!(
         "dictation: '{}' done ({} chars)",
         shortcut.name,
@@ -1234,6 +1477,18 @@ async fn transcribe(app: &AppHandle, mono_16k: &[f32]) -> Result<String, String>
         TranscriptionProvider::AppleSpeech => {
             run_apple_speech(app, mono_16k, Some(&settings.transcription.apple_locale)).await
         }
+        TranscriptionProvider::FluidAudio if settings.transcription.keep_model_ready => {
+            match crate::parakeet_worker::transcribe(app, mono_16k, &settings).await {
+                Ok(text) => Ok(text),
+                Err(error) if error == crate::parakeet_worker::TRANSCRIPTION_TIMEOUT_ERROR => {
+                    Err(error)
+                }
+                Err(error) => {
+                    log::warn!("dictation: resident Parakeet failed, using one-shot: {error}");
+                    run_fluidaudio(app, mono_16k, &settings).await
+                }
+            }
+        }
         // FluidAudio, Qwen3, and `Unknown` (old settings.json referencing dead
         // cloud providers) all run FluidAudio — matches the config.rs contract
         // and the recording path, instead of erroring out.
@@ -1325,55 +1580,91 @@ async fn run_text_pipeline(text: &str, pipeline_name: &str) -> Result<String, St
 
 // --- Tauri commands -------------------------------------------------------
 
-/// Cancel an in-flight dictation session: stop the mic, drop the samples, hide
-/// the HUD, restore volume. No transcription, no paste, no clipboard write.
-pub fn cancel_inner(app: &AppHandle) {
+fn take_cancelled_session(app: &AppHandle) -> Option<Session> {
     // Defensive: if a stop pipeline somehow raced in, supersede + abort it too
     // so cancel never leaves an orphaned sidecar or a pending paste behind.
-    supersede(app);
-    abort_pipeline(app);
-    let session = {
+    let (session, old_pipeline) = {
         let state = app.state::<DictationState>();
         let mut guard = match state.inner.lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return None,
         };
-        let s = guard.take();
-        state.is_active.store(false, Ordering::Relaxed);
-        s
+        let generation = state.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let was_active = state.is_active.load(Ordering::Acquire);
+        let mut session = guard.take();
+        if was_active {
+            // Finish A's UI ownership before B can claim `is_active` and show
+            // its own recording HUD / Escape handler.
+            crate::stop_tray_pulse();
+            unregister_escape_cancel(app);
+            if let Some(streaming) = session.as_mut().and_then(|s| s.streaming.take()) {
+                streaming.cancel();
+            }
+            let shortcut_id = session.as_ref().map(|s| s.shortcut_id.as_str());
+            log::info!("dictation: cancelled via Escape shortcut={shortcut_id:?}");
+            emit_status(
+                app,
+                generation,
+                "idle",
+                shortcut_id,
+                Some("Cancelled".into()),
+            );
+        } else {
+            // No live capture means Escape owns the post-capture HUD/pipeline.
+            // Do this under the same ownership lock so a new start cannot land
+            // between the decision and the hide event.
+            emit_status(app, generation, "idle", None, Some("Cancelled".into()));
+            unregister_escape_cancel(app);
+        }
+        state.is_active.store(false, Ordering::Release);
+        let old_pipeline = state
+            .pipeline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        (session, old_pipeline)
     };
-    crate::stop_tray_pulse();
-    let mut session = match session {
-        Some(s) => s,
-        None => return,
-    };
+    if let Some(handle) = old_pipeline {
+        handle.abort();
+    }
+    session
+}
+
+fn finish_cancel(mut session: Session) {
     // Pause + drop the stream and join the drain thread (same teardown the stop
     // path uses) so the callback stops, the drain thread exits, and no capture
     // buffer is left alive across shortcut cycles. Cancel discards the samples.
-    teardown_capture(&mut session);
+    let _ = teardown_capture(&mut session);
     if let Some(handle) = session.system_setup.take() {
-        // Cancel path is sync — can't await. Abort the background setup.
+        // Cleanup is already on a blocking caller. Abort the background setup.
         // If the spawn_blocking already produced a SystemAudioRecorder,
         // aborting drops that result; SystemAudioRecorder's Drop impl then
         // calls stop(), joining and ending the capture thread (otherwise it
         // would loop forever — this was the system-audio memory leak).
         handle.abort();
     }
-    unregister_escape_cancel(app);
     if let Some(orig) = session.pre_duck_volume {
         restore_system_volume_to(orig);
     }
-    if let Some(streaming) = session.streaming.take() {
-        streaming.cancel();
-    }
+}
 
-    log::info!("dictation: '{}' cancelled via Escape", session.shortcut_id);
-    emit_status(
-        app,
-        "idle",
-        Some(&session.shortcut_id),
-        Some("Cancelled".into()),
-    );
+/// Cancel an in-flight dictation from an already-blocking caller (wake
+/// reconciliation). No transcription, paste, or clipboard write.
+pub fn cancel_inner(app: &AppHandle) {
+    if let Some(session) = take_cancelled_session(app) {
+        finish_cancel(session);
+    }
+}
+
+/// Async entry points keep CoreAudio pause/drop and the drain join off the
+/// runtime worker while still waiting for cleanup before a new capture starts.
+async fn cancel_inner_async(app: &AppHandle) {
+    let Some(session) = take_cancelled_session(app) else {
+        return;
+    };
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || finish_cancel(session)).await {
+        log::error!("dictation: cancel teardown task failed: {error}");
+    }
 }
 
 fn register_escape_cancel(app: &AppHandle) {
@@ -1389,41 +1680,16 @@ fn register_escape_cancel(app: &AppHandle) {
                 }
                 let app = app_clone.clone();
                 tauri::async_runtime::spawn(async move {
-                    // If a session is in-flight: cancel mic + emit idle.
-                    // If only the post-pipeline HUD is lingering (error/done
-                    // state): just force-hide the window via emit_status so
-                    // the user can dismiss it instantly with Esc.
-                    let has_session = app
-                        .state::<DictationState>()
-                        .is_active
-                        .load(Ordering::Relaxed);
-                    if has_session {
-                        cancel_inner(&app);
-                    } else {
-                        force_hide_hud(&app);
-                    }
+                    // One ownership-locked path handles both a live capture and
+                    // a post-capture HUD/pipeline, so Escape cannot cancel B
+                    // using a stale decision made about A.
+                    cancel_inner_async(&app).await;
                 });
             });
         if let Err(e) = result {
             log::warn!("dictation: failed to register Escape cancel: {}", e);
         }
     }
-}
-
-/// Force-hide the dictation HUD immediately — used by Esc when the user is
-/// staring at a stale error/done message and wants it gone. Sends an
-/// `idle` event with `Cancelled` so the JS hide path runs with 0ms delay.
-pub fn force_hide_hud(app: &AppHandle) {
-    // Esc during the post-capture pipeline (transcribing/processing/pasting):
-    // bump the generation (authoritative supersede) AND kill the in-flight task.
-    // The generation covers the limbo window where the pipeline task isn't
-    // stored yet (so abort_pipeline is a no-op) — run_stop_pipeline re-checks it
-    // and bails before pasting. The abort is the fast-kill for an already-running
-    // sidecar. Both are no-ops when only a lingering error/done HUD is dismissed.
-    supersede(app);
-    abort_pipeline(app);
-    emit_status(app, "idle", None, Some("Cancelled".into()));
-    unregister_escape_cancel(app);
 }
 
 fn unregister_escape_cancel(app: &AppHandle) {
@@ -1438,8 +1704,21 @@ fn unregister_escape_cancel(app: &AppHandle) {
 /// that point Esc no longer has any HUD to dismiss, so we release the global
 /// hook (returning Esc to whatever app the user is in).
 #[tauri::command]
-pub fn dictation_release_esc(app: AppHandle) {
-    unregister_escape_cancel(&app);
+pub async fn dictation_release_esc(app: AppHandle, generation: u64) {
+    let released = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<DictationState>();
+        let _ownership = state
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.generation.load(Ordering::Acquire) == generation {
+            unregister_escape_cancel(&app);
+        }
+    })
+    .await;
+    if let Err(error) = released {
+        log::warn!("dictation: Escape release task failed: {error}");
+    }
 }
 
 #[tauri::command]
@@ -1448,8 +1727,8 @@ pub async fn dictation_start(app: AppHandle, shortcut_id: String) -> Result<(), 
 }
 
 #[tauri::command]
-pub fn dictation_cancel(app: AppHandle) {
-    cancel_inner(&app);
+pub async fn dictation_cancel(app: AppHandle) {
+    cancel_inner_async(&app).await;
 }
 
 #[tauri::command]
@@ -1716,8 +1995,16 @@ async fn run_fluidaudio(
 ) -> Result<String, String> {
     use tauri_plugin_shell::ShellExt;
 
-    let tmp = std::env::temp_dir().join(format!("nbp-dict-{}.wav", uuid::Uuid::new_v4().simple()));
-    write_mono_wav(&tmp, samples_16k, TARGET_RATE)?;
+    struct TempWav(std::path::PathBuf);
+    impl Drop for TempWav {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let tmp = TempWav(
+        std::env::temp_dir().join(format!("nbp-dict-{}.wav", uuid::Uuid::new_v4().simple())),
+    );
+    write_mono_wav(&tmp.0, samples_16k, TARGET_RATE)?;
 
     // Quick Dictate is single-speaker — always skip diarization (saves the
     // diarizer load/process + dodges the "No speech detected" VAD failure on
@@ -1728,7 +2015,7 @@ async fn run_fluidaudio(
         .shell()
         .sidecar("fluidaudio-sidecar")
         .map_err(|e| format!("sidecar create: {}", e))?
-        .arg(tmp.to_str().ok_or("invalid tmp path")?)
+        .arg(tmp.0.to_str().ok_or("invalid tmp path")?)
         .arg("--no-diarize");
     for a in crate::transcription::fluidaudio_engine_args(settings) {
         cmd = cmd.arg(a);
@@ -1742,25 +2029,27 @@ async fn run_fluidaudio(
     let mut stderr_buf = String::new();
     let mut exit_code: Option<i32> = None;
 
-    while let Some(event) = rx.recv().await {
-        use tauri_plugin_shell::process::CommandEvent;
-        match event {
-            CommandEvent::Stdout(data) => stdout_buf.extend_from_slice(&data),
-            CommandEvent::Stderr(data) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&data));
+    tokio::time::timeout(QUICK_DICTATE_TRANSCRIPTION_TIMEOUT, async {
+        while let Some(event) = rx.recv().await {
+            use tauri_plugin_shell::process::CommandEvent;
+            match event {
+                CommandEvent::Stdout(data) => stdout_buf.extend_from_slice(&data),
+                CommandEvent::Stderr(data) => {
+                    stderr_buf.push_str(&String::from_utf8_lossy(&data));
+                }
+                CommandEvent::Terminated(p) => {
+                    exit_code = p.code;
+                    // Process already exited — disarm so Drop doesn't kill() a
+                    // reaped PID (which could, in theory, have been reused).
+                    killer.0 = None;
+                    break;
+                }
+                _ => {}
             }
-            CommandEvent::Terminated(p) => {
-                exit_code = p.code;
-                // Process already exited — disarm so Drop doesn't kill() a
-                // reaped PID (which could, in theory, have been reused).
-                killer.0 = None;
-                break;
-            }
-            _ => {}
         }
-    }
-
-    let _ = std::fs::remove_file(&tmp);
+    })
+    .await
+    .map_err(|_| "FluidAudio transcription timed out".to_string())?;
 
     // Surface sidecar diagnostics (incl. TRANSLIT:/VOCAB: replacement lines).
     // Routed through `log::info!` (not `eprintln!`) so they land in the log file

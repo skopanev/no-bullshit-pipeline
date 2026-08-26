@@ -97,6 +97,9 @@ pub struct TranscriptionConfig {
     /// Apple SpeechTranscriber locale (BCP-47). Locale-locked; default en-US.
     #[serde(default = "default_apple_locale")]
     pub apple_locale: String,
+    /// Keep one Parakeet process resident for Quick Dictate.
+    #[serde(default)]
+    pub keep_model_ready: bool,
 }
 
 impl TranscriptionConfig {
@@ -124,6 +127,7 @@ impl Default for TranscriptionConfig {
             translit_min_len: 4,
             qwen3_variant: "f32".to_string(),
             apple_locale: "en-US".to_string(),
+            keep_model_ready: false,
         }
     }
 }
@@ -441,6 +445,8 @@ pub async fn save_settings(
     // persisted.
     let auto_record = settings.auto_record_meetings;
     save_settings_to_disk(&mut settings)?;
+    crate::parakeet_worker::reconcile(&app_handle);
+    crate::parakeet_worker::request_warmup(&app_handle, "settings");
 
     // Detector sync is NOT on the hot path: call_detector::sync_detector
     // and audio_process_detector::sync_detector both call handle.join() on

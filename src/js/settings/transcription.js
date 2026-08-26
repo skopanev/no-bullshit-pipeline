@@ -9,6 +9,7 @@ import { showToast } from '../ui/toast.js';
 import { repoToName } from './model-version.js';
 
 const transcriptionProviderSelect = document.getElementById('settings-transcription-provider');
+const keepModelReadyCheckbox = document.getElementById('settings-keep-model-ready');
 const diarizeCheckbox = document.getElementById('settings-diarize');
 const translitLangSelect = document.getElementById('settings-translit-lang');
 const translitThresholdInput = document.getElementById('settings-translit-threshold');
@@ -184,6 +185,9 @@ export function initTranscriptionSettings() {
 export function applyTranscriptionSettings() {
   if (!state.appSettings?.transcription) return;
   if (transcriptionProviderSelect) transcriptionProviderSelect.value = state.appSettings.transcription.provider;
+  if (keepModelReadyCheckbox) {
+    keepModelReadyCheckbox.checked = state.appSettings.transcription.keep_model_ready === true;
+  }
   if (diarizeCheckbox) diarizeCheckbox.checked = state.appSettings.transcription.diarize !== false;
   if (translitLangSelect) translitLangSelect.value = state.appSettings.transcription.translit_lang || 'ru';
   if (translitThresholdInput) translitThresholdInput.value = state.appSettings.transcription.translit_threshold ?? 0.72;
@@ -201,6 +205,7 @@ export function collectTranscriptionSettings() {
   // runs on-device so this never fails offline.
   state.appSettings.transcription.enabled = true;
   state.appSettings.transcription.provider = transcriptionProviderSelect?.value || 'FluidAudio';
+  state.appSettings.transcription.keep_model_ready = keepModelReadyCheckbox?.checked === true;
   state.appSettings.transcription.diarize = diarizeCheckbox ? diarizeCheckbox.checked : true;
   state.appSettings.transcription.translit_lang = translitLangSelect ? translitLangSelect.value : 'ru';
   if (translitThresholdInput) {

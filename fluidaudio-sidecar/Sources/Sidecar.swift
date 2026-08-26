@@ -721,6 +721,11 @@ struct FluidAudioSidecar {
             writeError("Usage: fluidaudio-sidecar <path-to-wav> [--engine parakeet-v3|qwen3] [--variant f32|int8] [--vocab <file>] [--lang <code>] [--no-diarize] [--segment-pause <sec>]  |  fluidaudio-sidecar --stream")
         }
 
+        if CommandLine.arguments[1] == "--resident-parakeet" {
+            await runResidentParakeet()
+            return
+        }
+
         if CommandLine.arguments[1] == "--stream" {
             await runStreamMode()
             return

@@ -45,6 +45,7 @@ console.log('dictation-hud: script loaded');
 let levelTimer = null;
 let waveTimer = null;
 let hideTimer = null;
+let statusGeneration = 0;
 // Bumped on every meter stop. Async level-probe callbacks capture the value at
 // schedule time and bail if it changed — kills late writes that re-stick a bar
 // after we've already reset to flat.
@@ -59,7 +60,8 @@ const hotkeyCache = new Map();
 //                                 even if the window happens to be visible
 //                                 during a race or paint warmup)
 //   3. body.hidden CSS class    — pointer-events:none + opacity:0 in webview
-async function setHudActive(active) {
+async function setHudActive(active, generation = statusGeneration) {
+  if (!active && generation !== statusGeneration) return;
   try {
     invoke('set_hud_clickthrough', { clickthrough: !active }).catch(() => {});
   } catch (_e) { /* ignore */ }
@@ -67,7 +69,7 @@ async function setHudActive(active) {
   // their Esc key back. Esc is re-registered automatically on the next
   // recording start in Rust.
   if (!active) {
-    try { invoke('dictation_release_esc').catch(() => {}); } catch (_e) { /* ignore */ }
+    try { invoke('dictation_release_esc', { generation }).catch(() => {}); } catch (_e) { /* ignore */ }
   }
   if (!hud) return;
   try {
@@ -87,6 +89,7 @@ function showHud() {
 }
 
 function scheduleHide(delayMs) {
+  const generation = statusGeneration;
   clearTimeout(hideTimer);
   hideTimer = setTimeout(() => {
     // Safety net: whatever animation/state we were in, a hidden HUD must
@@ -98,7 +101,7 @@ function scheduleHide(delayMs) {
     // ...and only hide the NSWindow once the fade has played out — otherwise
     // window.hide() yanks it instantly and the fade is never seen. showHud()
     // clears hideTimer, so a new session mid-fade cancels this cleanly.
-    hideTimer = setTimeout(() => setHudActive(false), 300);
+    hideTimer = setTimeout(() => setHudActive(false, generation), 300);
   }, delayMs);
 }
 
@@ -315,7 +318,8 @@ function prettyHotkey(hk) {
 
 async function onStatus(payload) {
   if (!payload) return;
-  const { state, message, shortcut_id } = payload;
+  const { state, message, shortcut_id, generation } = payload;
+  if (Number.isSafeInteger(generation)) statusGeneration = generation;
   console.log('dictation-hud: state →', state, shortcut_id || '');
 
   // Refresh the theme at the start of a session in case it changed in Settings.
