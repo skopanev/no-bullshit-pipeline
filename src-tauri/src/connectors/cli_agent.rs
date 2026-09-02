@@ -112,6 +112,19 @@ fn build_cli_command(cli: &str, full_prompt: &str, model: Option<&str>) -> Async
     }
 }
 
+/// Resolve the final CLI prompt across the current engine contract and the
+/// legacy connector contract. Current pipeline steps pass an already-rendered
+/// prompt; legacy callers may still pass transcript content separately.
+fn compose_full_prompt(prompt: &str, content: &str, prompt_complete: bool) -> String {
+    if prompt_complete {
+        prompt.to_string()
+    } else if prompt.contains("{transcript}") {
+        prompt.replace("{transcript}", content)
+    } else {
+        format!("{}\n\n{}", prompt, content)
+    }
+}
+
 /// Execute a CLI agent as a pipeline step.
 ///
 /// Config fields (simplified — the old `model_mode` / `model_args` / `provider`
@@ -120,6 +133,9 @@ fn build_cli_command(cli: &str, full_prompt: &str, model: Option<&str>) -> Async
 ///   prompt        - prompt text — for the new Connection model the engine
 ///                   substitutes placeholders into `step.template` and feeds
 ///                   the result here (required)
+///   prompt_complete - internal engine flag: `prompt` is already the complete
+///                   rendered input and must not be combined with the input
+///                   file again
 ///   model         - model id string passed verbatim to the CLI's -m flag
 ///                   (optional; CLI default if omitted). Free-text — we don't
 ///                   maintain a list, the CLI validates at runtime.
@@ -185,18 +201,21 @@ pub async fn execute(
         .map(|p| expand_tilde(p, &home))
         .unwrap_or_else(|| PathBuf::from(&home));
 
-    // Read input content. In the new Connection-based engine, this is the
-    // engine's transient input file holding the rendered template; pipeline
-    // is the entire prompt already. Old `{transcript}` substitution kept
-    // for backward-compat if someone still passes a template-shaped prompt.
-    let raw_content =
-        fs::read_to_string(input_path).map_err(|e| format!("Failed to read input file: {}", e))?;
-    let content = super::strip_frontmatter(&raw_content);
+    let prompt_complete = config
+        .get("prompt_complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    let full_prompt = if prompt.contains("{transcript}") {
-        prompt.replace("{transcript}", content)
+    let full_prompt = if prompt_complete {
+        compose_full_prompt(&prompt, "", true)
     } else {
-        format!("{}\n\n{}", prompt, content)
+        // Legacy connector contract: the config carried a prompt/template and
+        // the input file carried the transcript. Keep supporting it for old
+        // callers, but the shared pipeline engine always uses prompt_complete.
+        let raw_content = fs::read_to_string(input_path)
+            .map_err(|e| format!("Failed to read input file: {}", e))?;
+        let content = super::strip_frontmatter(&raw_content);
+        compose_full_prompt(&prompt, content, false)
     };
 
     let mut cmd = build_cli_command(cli, &full_prompt, model);
@@ -372,3 +391,23 @@ fn write_error(
 // Dictate used to call directly. Dictation now routes through the shared
 // `pipeline_engine::run_one_step` (same dispatch as recordings), so they're
 // gone — no second CLI-spawning path to drift from `execute()`.
+
+#[cfg(test)]
+mod tests {
+    use super::compose_full_prompt;
+
+    #[test]
+    fn complete_rendered_prompt_is_not_appended_twice() {
+        let prompt = "Structure this:\nA short but real thought.";
+        let full = compose_full_prompt(prompt, prompt, true);
+
+        assert_eq!(full, prompt);
+        assert_eq!(full.matches("A short but real thought.").count(), 1);
+    }
+
+    #[test]
+    fn legacy_transcript_placeholder_is_still_supported() {
+        let full = compose_full_prompt("Structure this:\n{transcript}", "Raw thought", false);
+        assert_eq!(full, "Structure this:\nRaw thought");
+    }
+}

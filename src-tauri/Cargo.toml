@@ -64,6 +64,11 @@ tauri-plugin-global-shortcut = "2"
 audioadapter = "5.0.0"
 audioadapter-buffers = "5.1.0"
 
+# Finder/Spotlight-launched apps do not inherit PATH from the user's shell,
+# which otherwise makes installed pipeline CLIs appear to be missing.
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
+
 [profile.release]
 strip = true
 lto = true
@@ -71,4 +76,3 @@ codegen-units = 1
 
 [dev-dependencies]
 tempfile = "3.27"
-

@@ -166,6 +166,13 @@ fn maybe_sweep_retention(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // GUI apps launched through Finder/Spotlight do not inherit PATH from the
+    // user's shell startup files. Restore it before Tauri starts any worker
+    // threads so CLI-agent availability checks and execution see the same
+    // binaries as a terminal session.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let path_fix_error = fix_path_env::fix().err().map(|error| error.to_string());
+
     // Logging is initialized below via tauri-plugin-log (stdout + a log file in
     // the OS log dir), so release builds keep durable logs a user can send.
 
@@ -232,7 +239,12 @@ pub fn run() {
             std::sync::Mutex::new(permissions::PermissionsState::default()),
         )))
         .manage(settings)
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            if let Some(error) = &path_fix_error {
+                log::warn!("startup: failed to restore shell PATH: {error}");
+            }
+
             // Ensure the app appears in Dock and Cmd+Tab
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Regular);

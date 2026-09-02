@@ -1259,6 +1259,13 @@ async fn run_text_pipeline(text: &str, pipeline_name: &str) -> Result<String, St
         .ok_or_else(|| format!("Pipeline '{}' not found", pipeline_name))?
         .clone();
 
+    log::info!(
+        "dictation pipeline '{}': input_chars={}, steps={}",
+        pipeline_name,
+        text.chars().count(),
+        pipeline.steps.len()
+    );
+
     // Ephemeral context: dictation has no recording, so connector artifacts go
     // to a throwaway temp dir (the recordings UI never reads them) and the app
     // name is just "Dictation". Everything else runs through the *same*

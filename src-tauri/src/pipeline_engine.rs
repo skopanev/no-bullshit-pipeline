@@ -323,13 +323,16 @@ async fn dispatch_step(
         StepType::CliAgent => {
             // Engine has already substituted `{transcript}` etc. into
             // rendered_input. Feed it as the entire prompt by injecting it into
-            // the config the connector reads.
+            // the config the connector reads. Mark it complete so the
+            // connector does not append the transient input file a second time.
             let mut cfg = step.config.clone();
             ensure_object(&mut cfg);
-            cfg.as_object_mut().expect("ensured above").insert(
+            let cfg_obj = cfg.as_object_mut().expect("ensured above");
+            cfg_obj.insert(
                 "prompt".to_string(),
                 serde_json::Value::String(rendered_input.to_string()),
             );
+            cfg_obj.insert("prompt_complete".to_string(), serde_json::Value::Bool(true));
 
             connectors::cli_agent::execute(
                 &input_path,
