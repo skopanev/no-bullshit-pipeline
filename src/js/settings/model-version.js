@@ -154,7 +154,16 @@ async function startDownload() {
     showToast(force ? 'Model updated' : 'Model downloaded', 'success');
   } catch (e) {
     console.error('download_asr_model failed:', e);
-    showToast('Model download failed', 'error');
+    const detail = String(e || 'Unknown error');
+    showToast(`Model update failed: ${detail}`, 'error', 10000);
+    if (banner) {
+      el('model-update-text').textContent = 'Model update failed';
+      const p = el('model-update-progress');
+      if (p) {
+        p.style.display = '';
+        p.textContent = detail;
+      }
+    }
   } finally {
     downloading = false;
     await refreshModelVersion(true);
@@ -168,7 +177,11 @@ export function initModelVersion() {
     const pct = Math.max(0, Math.min(100, d.percent ?? 0));
     const stage = d.stage && d.stage !== 'Complete' ? d.stage : '';
     const p = el('model-update-progress');
-    if (p) p.textContent = pct >= 100 ? 'finishing…' : stage ? `${stage}… ${pct}%` : `${pct}%`;
+    if (p) {
+      if (pct >= 100) p.textContent = 'finishing…';
+      else if (stage === 'Downloading') p.textContent = `${stage}… ${pct}% · progress may jump`;
+      else p.textContent = stage ? `${stage}… ${pct}%` : `${pct}%`;
+    }
     const banner = el('model-update-banner');
     if (banner) {
       banner.style.background = `linear-gradient(to right, #bae6fd 0 ${pct}%, #e0f2fe ${pct}% 100%)`;

@@ -3,7 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::Manager;
+
+/// Increment only when a startup migration changes persisted config/metadata
+/// semantics. Missing on old installs deserializes as 0; brand-new installs
+/// start at the current schema and skip historical migrations.
+pub const CURRENT_DATA_SCHEMA_VERSION: u32 = 1;
+static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum TranscriptionProvider {
@@ -144,6 +151,12 @@ pub enum StepType {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub data_schema_version: u32,
+    /// Kept as a typed field so normal settings saves do not erase the legacy
+    /// transcript migration marker and make that migration run every launch.
+    #[serde(default)]
+    pub transcript_migration_done: bool,
     pub storage_path: String,
     pub auto_discard_seconds: u32,
     pub theme: String,
@@ -310,6 +323,8 @@ fn default_apple_locale() -> String {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            data_schema_version: CURRENT_DATA_SCHEMA_VERSION,
+            transcript_migration_done: false,
             storage_path: get_data_dir().to_string_lossy().to_string(),
             auto_discard_seconds: 3,
             theme: "auto".to_string(),
@@ -411,21 +426,35 @@ pub fn load_settings() -> AppSettings {
 
 /// Save settings to disk (internal — no Tauri state required)
 pub fn save_settings_to_disk(settings: &mut AppSettings) -> Result<(), String> {
+    let _guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .map_err(|_| "Settings write lock poisoned".to_string())?;
     let config_dir = get_config_dir();
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     }
 
+    // Serialize before touching disk, then replace settings.json atomically.
+    // A crash or full disk can leave a disposable .tmp, never a truncated
+    // source-of-truth file.
+    let content = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
     let path = get_settings_path();
-    let file = File::create(&path).map_err(|e| e.to_string())?;
-    serde_json::to_writer_pretty(file, &settings).map_err(|e| e.to_string())?;
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, content).map_err(|e| e.to_string())?;
 
     // Set file permissions to 600 (user read/write only) for security
-    let mut perms = fs::metadata(&path)
+    let mut perms = fs::metadata(&temp_path)
         .map_err(|e| e.to_string())?
         .permissions();
     perms.set_mode(0o600);
-    fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+    if let Err(error) = fs::set_permissions(&temp_path, perms) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
+    if let Err(error) = fs::rename(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.to_string());
+    }
 
     Ok(())
 }

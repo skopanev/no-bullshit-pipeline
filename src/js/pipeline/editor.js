@@ -5,6 +5,7 @@ import { escapeHtml } from '../core/utils.js';
 import { showToast } from '../ui/toast.js';
 import { showConfirm } from '../ui/confirm-modal.js';
 import { CONNECTOR_META } from './constants.js';
+import * as appState from '../core/state.js';
 import * as pipelineState from './state.js';
 import { stepSubLabel, stepDisplayLabel } from './flow-renderer.js';
 import { maybeAutoName } from './delivery-options.js';
@@ -199,6 +200,10 @@ if (savePipelineDefBtn) {
     const name = pipelineEditorName.value.trim();
     const desc = pipelineEditorDesc.value.trim();
     if (!name) { showToast('Pipeline name is required', 'error'); return; }
+    if (pipelineState.pipelineEditorSteps.length === 0) {
+      showToast('Add at least one step to the pipeline', 'error');
+      return;
+    }
 
     for (let i = 0; i < pipelineState.pipelineEditorSteps.length; i++) {
       const s = pipelineState.pipelineEditorSteps[i];
@@ -237,10 +242,14 @@ if (savePipelineDefBtn) {
         steps: pipelineState.pipelineEditorSteps,
         auto_run: existing?.auto_run || false,
       };
-      if (pipelineState.editingPipelineDef && pipelineState.editingPipelineDef !== name) {
-        await invoke('delete_pipeline', { name: pipelineState.editingPipelineDef });
-      }
-      await invoke('save_pipeline', { pipeline });
+      // Rename is one backend read-modify-write transaction. The old
+      // delete-then-save sequence could lose the pipeline if the second write
+      // failed and left shortcut/default references dangling.
+      await invoke('save_pipeline', {
+        pipeline,
+        previousName: pipelineState.editingPipelineDef || null,
+      });
+      appState.setAppSettings(await invoke('load_settings'));
       closePipelineEditor();
       await loadPipelineDefs();
     } catch (err) {
@@ -258,6 +267,7 @@ if (deletePipelineDefBtn) {
     if (!ok) return;
     try {
       await invoke('delete_pipeline', { name: pipelineState.editingPipelineDef });
+      appState.setAppSettings(await invoke('load_settings'));
       closePipelineEditor();
       await loadPipelineDefs();
     } catch (err) {

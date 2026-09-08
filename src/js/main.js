@@ -112,6 +112,19 @@ async function init() {
     }
   });
 
+  listen('tray-open-recording', async (event) => {
+    await showDetailView(event.payload);
+  });
+
+  listen('tray-open-settings', () => {
+    ViewManager.showSettings();
+  });
+
+  listen('tray-open-pipelines', () => {
+    ViewManager.showSettings();
+    switchSettingsTab('pipelines');
+  });
+
   // Auto-start recording when a call is detected
   listen('call-detected', async () => {
     if (!state.isRecording && !state.isRecordingBusy) {

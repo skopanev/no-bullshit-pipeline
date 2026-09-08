@@ -274,6 +274,9 @@ async function openEditor(id) {
 }
 
 function closeEditor() {
+  // Blur explicitly so backend capture mode always restores the persisted
+  // global bindings, including when the panel is hidden programmatically.
+  if (hotkeyInput()) hotkeyInput().blur();
   editor().style.display = 'none';
   editingId = null;
 }
@@ -517,8 +520,9 @@ function initHotkeyCapture() {
   const input = hotkeyInput();
   if (!input) return;
   input.addEventListener('keydown', captureHotkey);
-  // While the field is focused, arm the backend Fn-key tap so pressing 🌐 / Fn
-  // (which the WebView never sees) gets captured and pushed back as the hotkey.
+  // While the field is focused, suspend every persisted dictation binding and
+  // arm the backend Fn-key tap. Otherwise entering an already-bound regular
+  // combo would also execute that shortcut while we were trying to edit it.
   // The pulsing field border (.recording) is the visual "waiting" cue.
   input.addEventListener('focus', () => {
     input.classList.add('recording');

@@ -52,6 +52,10 @@ pub fn start_recording(
     if *is_recording {
         return Err("Already recording".to_string());
     }
+    // One process-wide claim prevents regular recording and Quick Dictate from
+    // opening the microphone concurrently. It rolls back automatically if any
+    // setup step below fails.
+    let mut capture_claim = crate::capture_coordinator::claim_recording(&app_handle)?;
 
     // Leaked-session probe: at the start of a fresh recording no mic stream
     // should be alive. >0 here means a prior session never disposed its cpal
@@ -75,7 +79,7 @@ pub fn start_recording(
     // Default title for manual recordings: "NBP · HH:MM". Call recordings get
     // this overwritten with "{App} · HH:MM" by call_session::run_start.
     let title = format!("NBP · {}", chrono::Local::now().format("%H:%M"));
-    let metadata = storage::create_recording(title, vec![])?;
+    let metadata = storage::create_recording(title)?;
     *state.save_mix_only.lock().map_err(|e| e.to_string())? = save_mix_only;
 
     // --- Real-time Mixer FIRST (so it's ready before capture threads push data) ---
@@ -121,8 +125,10 @@ pub fn start_recording(
     *state.current_session.lock().map_err(|e| e.to_string())? = Some(metadata);
     *is_recording = true;
 
+    capture_claim.activate_recording(metadata_clone.id.clone(), metadata_clone.title.clone());
     // Blink the tray icon while recording.
     crate::start_tray_pulse(&app_handle);
+    capture_claim.commit();
 
     Ok(metadata_clone)
 }
@@ -173,6 +179,7 @@ pub fn stop_recording(
     }
     log::info!("[ignore-trace] stop_recording: is_recording=true, proceeding to stop captures");
 
+    crate::capture_coordinator::begin_finishing_recording(&app_handle);
     // Stop the tray-icon blink — recording is ending.
     crate::stop_tray_pulse();
 
@@ -286,10 +293,12 @@ pub fn stop_recording(
                 id
             );
             let _ = app_handle.emit("recording_discarded", &id);
+            crate::capture_coordinator::finish_recording(&app_handle, Some(&id));
         } else {
             log::warn!(
                 "[ignore-trace] stop_recording DISCARD: session_guard.take() returned None — no emit"
             );
+            crate::capture_coordinator::finish_recording(&app_handle, None);
         }
         return Ok(());
     }
@@ -353,6 +362,10 @@ pub fn stop_recording(
                     finalization_id,
                     dir_after
                 );
+                crate::capture_coordinator::finish_recording(
+                    &finalization_app_handle,
+                    Some(&finalization_id),
+                );
                 // Notify frontend that recording is finalized and ready
                 let _ = finalization_app_handle.emit("recording_complete", &finalization_id);
             }))
@@ -362,14 +375,16 @@ pub fn stop_recording(
     };
 
     // Store finalization handle so it can be joined on shutdown or next recording
-    if let Some(handle) = finalization_handle
-        && let Ok(mut h) = state.finalization_handle.lock()
-    {
-        // Join any previous handle first
-        if let Some(prev) = h.take() {
-            let _ = prev.join();
+    if let Some(handle) = finalization_handle {
+        if let Ok(mut h) = state.finalization_handle.lock() {
+            // Join any previous handle first
+            if let Some(prev) = h.take() {
+                let _ = prev.join();
+            }
+            *h = Some(handle);
         }
-        *h = Some(handle);
+    } else {
+        crate::capture_coordinator::finish_recording(&app_handle, None);
     }
 
     *is_recording = false;

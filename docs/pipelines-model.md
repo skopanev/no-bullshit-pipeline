@@ -78,7 +78,20 @@ the base behaviour**, not a separate step.
 
 A failed step halts everything downstream (later steps can't run without the
 prior step's output) and marks the run `Partial`. A run with no failures is
-`Done`. A zero-step pipeline is a valid label that returns `Done` immediately.
+`Done`. New pipelines must contain at least one step; pipeline definitions are
+not used as recording tags.
+
+## Storage ownership
+
+- `~/.nbp/pipelines.json` is the only source of truth for pipeline definitions.
+- `~/.nbp/settings.json` stores only name references (default, last used, and
+  dictation shortcut selection).
+- A recording's `metadata.json` stores only actual pipeline run history.
+- Frontend arrays are reloadable snapshots, not an independent cache or store.
+
+Definition reads are side-effect free. Create, edit, rename, and delete are
+serialized backend operations and replace `pipelines.json` atomically. Renames
+also update settings references in the same command.
 
 ## Dictation
 
@@ -96,10 +109,18 @@ transform failure falls back to pasting the raw transcript.
 
 ## Legacy migration
 
+Storage schema v1 runs once at startup. It moves a legacy `pipelines.json` out
+of the recordings directory, removes obsolete recording `tags`, removes only
+the exact zero-step pipeline definitions/states previously synthesized from
+those tags, and clears settings references that point to missing definitions.
+The version is recorded only after all writes succeed, so an interrupted pass
+is safe to retry. Normal recording reads never perform this migration.
+
 Pre-simplification pipelines referenced removed networked-delivery types
 (notion/slack/telegram/webhook) and a `connection_id` field. `load_pipelines`
 parses loosely and drops any step whose type isn't `cli_agent`/`shell`/
 `save_local`; `connection_id` is ignored. Surviving steps are kept (a legacy
 `save_local` step loses its folder — it lived on the Connection — so the user
-re-picks it); a pipeline that still won't parse is skipped (logged), never
-nuking the whole file. There is no Connections tab, no Keychain for connectors.
+re-picks it). Invalid JSON or an invalid remaining pipeline is reported and is
+never overwritten by a later save. There is no Connections tab or Keychain for
+connectors.

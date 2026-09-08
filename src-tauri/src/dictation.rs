@@ -69,6 +69,10 @@ pub struct DictationState {
 
 struct Session {
     shortcut_id: String,
+    /// Token for the shared recording/dictation coordinator. Separate from the
+    /// delivery generation: the token owns the tray/exclusivity lifecycle,
+    /// while generation prevents stale paste after cancellation.
+    capture_token: u64,
     /// The delivery generation this session claimed at start. Carried into the
     /// detached pipeline so it can detect supersession (Esc, or a newer
     /// delivery) and bail before pasting.
@@ -488,19 +492,22 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
         commit: false,
     };
 
-    // Claim a fresh delivery generation. This atomically supersedes any
-    // still-running pipeline from the previous dictation (its `is_active` was
-    // already cleared at stop, so it could otherwise paste stale text into this
-    // new context): the bump makes the old generation non-current, so the old
-    // pipeline bails at its next boundary check. We also abort it to kill its
-    // sidecar promptly — but correctness rests on the generation, not the
-    // (cooperative, await-only) abort. No reset race: the counter only ever
-    // increments, so the old delivery can never observe itself as "current".
-    let generation = claim_generation(app);
-    abort_pipeline(app);
-
     let shortcut = find_shortcut(shortcut_id)
         .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
+    let context = crate::capture_coordinator::DictationContext {
+        name: shortcut.name.clone(),
+        pipeline: shortcut.pipeline.clone(),
+        auto_paste: shortcut.auto_paste,
+    };
+    // Claim shared capture ownership before superseding any prior delivery. If a
+    // recording or dictation is still running/processing, this start is rejected
+    // without disturbing it.
+    let mut capture_claim = crate::capture_coordinator::claim_dictation(app, context, false)?;
+
+    // A successful claim starts a fresh delivery generation. The monotonic
+    // generation remains the final paste-safety gate for Esc cancellation.
+    let generation = claim_generation(app);
+    abort_pipeline(app);
 
     // #2 — Instant start. Opening the mic below can block ~1-2s on Bluetooth
     // (the A2DP→HFP profile switch), so fire the live "recording" HUD NOW,
@@ -618,6 +625,7 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
 
     let mut session = Session {
         shortcut_id: shortcut.id.clone(),
+        capture_token: capture_claim.token(),
         generation,
         samples,
         drain_stop,
@@ -660,6 +668,7 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
             return Ok(());
         }
         *guard = Some(session);
+        capture_claim.activate_dictation();
         // Start the pulse INSIDE the critical section — while is_active is still
         // true and the session is installed under this same lock. cancel_inner /
         // stop_inner take this lock to clear is_active and take the session, so
@@ -670,6 +679,7 @@ pub async fn start_inner(app: &AppHandle, shortcut_id: &str) -> Result<(), Strin
     // is_active was claimed at the top via compare_exchange — commit the guard
     // so it doesn't clear it on drop. Stays true until stop/cancel.
     active_guard.commit = true;
+    capture_claim.commit();
 
     // "recording" HUD was already emitted up-front (instant start).
     log::info!(
@@ -699,10 +709,18 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
     let mut session = match session {
         Some(s) => s,
         None => {
+            crate::capture_coordinator::cancel_current_dictation(app);
             emit_status(app, "idle", None, None);
             return Ok(String::new());
         }
     };
+    let capture_token = session.capture_token;
+    let completion = crate::capture_coordinator::DictationCompletionGuard::new(app, capture_token);
+    crate::capture_coordinator::set_dictation_phase(
+        app,
+        capture_token,
+        crate::capture_coordinator::DictationPhase::Transcribing,
+    );
 
     let shortcut_id = session.shortcut_id.clone();
     // ESC stays registered through the pipeline so the user can dismiss the
@@ -767,6 +785,7 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
 
     let app_task = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
+        let _completion = completion;
         let _ = run_stop_pipeline(
             &app_task,
             shortcut,
@@ -776,6 +795,7 @@ pub async fn stop_inner(app: &AppHandle) -> Result<String, String> {
             channels,
             sample_rate,
             generation,
+            capture_token,
         )
         .await;
     });
@@ -799,6 +819,7 @@ async fn run_stop_pipeline(
     channels: u16,
     sample_rate: u32,
     generation: u64,
+    capture_token: u64,
 ) -> Result<String, String> {
     // Entry guard: Esc may have fired during stop_inner's teardown limbo
     // (is_active already false, no handle to abort yet), or a newer delivery may
@@ -840,7 +861,7 @@ async fn run_stop_pipeline(
             return Ok(String::new());
         }
         // Streaming path has no buffered samples to save — pass None.
-        return process_and_deliver(app, &shortcut, trimmed, None, generation).await;
+        return process_and_deliver(app, &shortcut, trimmed, None, generation, capture_token).await;
     }
 
     if raw_samples.is_empty() {
@@ -932,7 +953,15 @@ async fn run_stop_pipeline(
 
     // Audio path: hand the (16 kHz mono) samples to process_and_deliver so it
     // can optionally save them as a full recording (Save dictations setting).
-    process_and_deliver(app, &shortcut, trimmed, Some(mono_16k), generation).await
+    process_and_deliver(
+        app,
+        &shortcut,
+        trimmed,
+        Some(mono_16k),
+        generation,
+        capture_token,
+    )
+    .await
 }
 
 /// Surface a fatal error to the HUD and return an Err. The HUD listens for
@@ -961,8 +990,16 @@ pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<S
     let shortcut = find_shortcut(shortcut_id)
         .ok_or_else(|| format!("Shortcut '{}' not found", shortcut_id))?;
 
-    // Fresh delivery — claim a generation (supersedes any older in-flight
-    // delivery) and abort a prior pipeline's sidecar.
+    let context = crate::capture_coordinator::DictationContext {
+        name: shortcut.name.clone(),
+        pipeline: shortcut.pipeline.clone(),
+        auto_paste: shortcut.auto_paste,
+    };
+    let mut capture_claim = crate::capture_coordinator::claim_dictation(app, context, true)?;
+    let capture_token = capture_claim.token();
+
+    // Fresh delivery generation. The shared claim above ensures we don't
+    // disturb another live recording/dictation merely by pressing this hotkey.
     let generation = claim_generation(app);
     abort_pipeline(app);
 
@@ -995,9 +1032,20 @@ pub async fn run_clipboard_inner(app: &AppHandle, shortcut_id: &str) -> Result<S
     // it's released on HUD-hide (dictation_release_esc) or by force_hide_hud.
     // Clipboard input has no audio to save.
     register_escape_cancel(app);
+    let completion = crate::capture_coordinator::DictationCompletionGuard::new(app, capture_token);
+    capture_claim.commit();
     let app_task = app.clone();
     let handle = tauri::async_runtime::spawn(async move {
-        let _ = process_and_deliver(&app_task, &shortcut, trimmed, None, generation).await;
+        let _completion = completion;
+        let _ = process_and_deliver(
+            &app_task,
+            &shortcut,
+            trimmed,
+            None,
+            generation,
+            capture_token,
+        )
+        .await;
     });
     if let Ok(mut g) = app.state::<DictationState>().pipeline.lock() {
         *g = Some(handle);
@@ -1014,6 +1062,7 @@ async fn process_and_deliver(
     input_text: String,
     audio_samples_16k: Option<Vec<f32>>,
     generation: u64,
+    capture_token: u64,
 ) -> Result<String, String> {
     let shortcut_id = shortcut.id.clone();
 
@@ -1046,6 +1095,11 @@ async fn process_and_deliver(
     }
 
     let final_text = if let Some(ref pipeline_name) = shortcut.pipeline {
+        crate::capture_coordinator::set_dictation_phase(
+            app,
+            capture_token,
+            crate::capture_coordinator::DictationPhase::Processing,
+        );
         emit_status(app, "processing", Some(&shortcut_id), None);
         match run_text_pipeline(&input_text, pipeline_name).await {
             Ok(processed) => processed,
@@ -1083,6 +1137,11 @@ async fn process_and_deliver(
         return Ok(String::new());
     }
 
+    crate::capture_coordinator::set_dictation_phase(
+        app,
+        capture_token,
+        crate::capture_coordinator::DictationPhase::Pasting,
+    );
     if shortcut.auto_paste {
         emit_status(app, "pasting", Some(&shortcut_id), None);
         match paste_text(&final_trimmed, app, generation) {
@@ -1135,7 +1194,7 @@ async fn save_dictation_as_recording(
     // list. The explicit `source` field on the metadata is the canonical
     // signal for any code-level filtering.
     let title = format!("Dictation · {}", chrono::Local::now().format("%H:%M"));
-    let metadata = crate::storage::create_recording(title, vec![])?;
+    let metadata = crate::storage::create_recording(title)?;
     let recording_dir = crate::storage::get_recording_dir(&metadata.id);
 
     // Audio: encode the 16 kHz mono buffer as audio_mix.ogg — same filename
@@ -1352,7 +1411,12 @@ pub fn cancel_inner(app: &AppHandle) {
     crate::stop_tray_pulse();
     let mut session = match session {
         Some(s) => s,
-        None => return,
+        None => {
+            crate::capture_coordinator::cancel_current_dictation(app);
+            unregister_escape_cancel(app);
+            emit_status(app, "idle", None, Some("Cancelled".into()));
+            return;
+        }
     };
     // Pause + drop the stream and join the drain thread (same teardown the stop
     // path uses) so the callback stops, the drain thread exits, and no capture
@@ -1374,6 +1438,7 @@ pub fn cancel_inner(app: &AppHandle) {
         streaming.cancel();
     }
 
+    crate::capture_coordinator::cancel_current_dictation(app);
     log::info!("dictation: '{}' cancelled via Escape", session.shortcut_id);
     emit_status(
         app,
@@ -1788,7 +1853,7 @@ async fn run_fluidaudio(
         "DICT_DIAG engine=fluidaudio {} audio_s={:.2} cache_load={} model_init={} transcribe={}",
         system_mem_diag(),
         samples_16k.len() as f64 / TARGET_RATE as f64,
-        parse_sidecar_timing(&stderr_buf, "asrModels.downloadAndLoad"),
+        parse_sidecar_timing(&stderr_buf, "asrModels.loadFromCache"),
         parse_sidecar_timing(&stderr_buf, "asrManager.loadModels"),
         parse_sidecar_timing(&stderr_buf, "asrManager.transcribe"),
     );

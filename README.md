@@ -135,7 +135,6 @@ Any first argument other than `transcribe` launches the app as usual. The sideca
 
 - **Adaptive Themes**: Auto (follows macOS appearance), Light, and Dark.
 - **Dynamic Header**: Context-aware UI that transforms based on your current task.
-- **Smart Tagging**: Rank-based tag suggestions for lightning-fast organization.
 - **Confirmation Modals**: Safety prompts for destructive actions.
 - **Finder Integration**: One click to reveal raw files.
 
@@ -146,7 +145,7 @@ Recordings are stored in `~/nbp-data/` (configurable), config in `~/.nbp/`:
 ```
 ~/nbp-data/
 ├── {uuid}/
-│   ├── metadata.json                  # Title, tags, timestamps, attendees, pipeline states
+│   ├── metadata.json                  # Title, timestamps, attendees, pipeline run history
 │   ├── audio_mix.ogg                  # Combined master mix (always present)
 │   ├── raw_mic.ogg                    # Mic track (only if mix-only mode is off)
 │   ├── raw_system.ogg                 # System track (only if mix-only mode is off)
@@ -159,7 +158,6 @@ Recordings are stored in `~/nbp-data/` (configurable), config in `~/.nbp/`:
 ~/.nbp/
 ├── settings.json                      # App settings
 ├── pipelines.json                     # Pipeline definitions
-├── projects.json                      # Tag-based projects
 ├── asr-models.json                    # Downloaded ASR model tracking
 └── models/
     ├── *                              # Downloaded ASR models

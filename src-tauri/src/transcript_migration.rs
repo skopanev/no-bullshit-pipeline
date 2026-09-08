@@ -167,42 +167,14 @@ pub fn migrate_all_transcripts() -> Result<usize, String> {
 
 /// Check if transcript migration has been completed
 pub fn is_migration_needed() -> bool {
-    // Check for migration flag in settings JSON
-    let settings_path = crate::config::get_settings_path();
-    if let Ok(content) = fs::read_to_string(settings_path)
-        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
-        && let Some(migrated) = json
-            .get("transcript_migration_done")
-            .and_then(|v| v.as_bool())
-    {
-        return !migrated;
-    }
-    // If no flag found, migration is needed (but only if there are recordings)
-    true
+    !crate::config::load_settings().transcript_migration_done
 }
 
 /// Mark transcript migration as completed in settings
 pub fn mark_migration_done() -> Result<(), String> {
-    let settings_path = crate::config::get_settings_path();
-
-    let mut json = if let Ok(content) = fs::read_to_string(&settings_path) {
-        serde_json::from_str::<serde_json::Value>(&content).unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
-    json["transcript_migration_done"] = serde_json::Value::Bool(true);
-
-    let config_dir = crate::config::get_config_dir();
-    if !config_dir.exists() {
-        fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    }
-
-    let content =
-        serde_json::to_string_pretty(&json).map_err(|e| format!("Failed to serialize: {}", e))?;
-    fs::write(&settings_path, content).map_err(|e| format!("Failed to write settings: {}", e))?;
-
-    Ok(())
+    let mut settings = crate::config::load_settings();
+    settings.transcript_migration_done = true;
+    crate::config::save_settings_to_disk(&mut settings)
 }
 
 /// Run transcript migration if needed (called on app startup)

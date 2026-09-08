@@ -167,7 +167,6 @@ fn test_recording_metadata_serialization() {
         id: "test-123".to_string(),
         created_at: "2024-01-15T10:30:00Z".to_string(),
         title: "Test Recording".to_string(),
-        tags: vec!["meeting".to_string(), "important".to_string()],
         status: "ready".to_string(),
         audio: AudioFiles {
             mic: Some(AudioInfo {
@@ -206,7 +205,10 @@ fn test_recording_metadata_serialization() {
         json.contains("\"id\": \"test-123\""),
         "JSON should contain id"
     );
-    assert!(json.contains("\"tags\""), "JSON should contain tags");
+    assert!(
+        !json.contains("\"tags\""),
+        "Current metadata should not serialize removed legacy tags"
+    );
 }
 
 // ============================================
@@ -579,7 +581,6 @@ fn test_xss_common_vectors_data_format() {
     struct TestRecording {
         id: String,
         title: String,
-        tags: Vec<String>,
     }
 
     let xss_vectors = [
@@ -597,7 +598,6 @@ fn test_xss_common_vectors_data_format() {
         let recording = TestRecording {
             id: format!("xss-test-{}", idx),
             title: vector.to_string(),
-            tags: vec![vector.to_string()],
         };
 
         // Should serialize without issues
@@ -612,7 +612,6 @@ fn test_xss_common_vectors_data_format() {
             restored.title, *vector,
             "XSS vector should be preserved in data layer"
         );
-        assert_eq!(restored.tags[0], *vector);
     }
 
     println!(
@@ -727,34 +726,6 @@ fn test_recording_title_with_unicode_and_special_chars() {
         "Recording title special chars test: PASSED ({} titles tested)",
         test_titles.len()
     );
-}
-
-#[test]
-fn test_tag_names_with_xss_vectors() {
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    struct TestRecordingTags {
-        tags: Vec<String>,
-    }
-
-    let recording = TestRecordingTags {
-        tags: vec![
-            "normal-tag".to_string(),
-            "<script>alert(1)</script>".to_string(),
-            "<img src=x onerror=alert(1)>".to_string(),
-            "tag with spaces & special <chars>".to_string(),
-        ],
-    };
-
-    let json = serde_json::to_string(&recording).expect("Should serialize");
-    let restored: TestRecordingTags = serde_json::from_str(&json).expect("Should deserialize");
-
-    assert_eq!(restored.tags.len(), 4, "Should preserve all tags");
-    assert_eq!(restored.tags[1], "<script>alert(1)</script>");
-    assert_eq!(restored.tags[2], "<img src=x onerror=alert(1)>");
-
-    println!("Tag names with XSS vectors test: PASSED");
 }
 
 #[test]

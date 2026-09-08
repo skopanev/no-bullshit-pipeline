@@ -1,9 +1,16 @@
-use crate::config::{StepType, get_config_dir};
-use crate::storage::get_data_dir;
+use crate::config::{AppSettings, CURRENT_DATA_SCHEMA_VERSION, StepType, get_config_dir};
+use crate::storage::{RecordingMetadata, get_data_dir};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Definitions have one source of truth (`~/.nbp/pipelines.json`). Serialize
+/// every read-modify-write sequence so two UI actions cannot overwrite each
+/// other's snapshot.
+static PIPELINES_LOCK: Mutex<()> = Mutex::new(());
 
 /// A single step in a pipeline.
 ///
@@ -118,13 +125,67 @@ fn get_pipelines_path() -> PathBuf {
     get_config_dir().join("pipelines.json")
 }
 
-/// Migrate pipelines.json from old data dir to config dir (one-time)
-fn migrate_pipelines_if_needed() {
+/// Move the legacy pipelines.json out of the recordings directory. This is
+/// called only by the schema migration at startup; normal reads stay pure.
+fn migrate_pipelines_to_config_dir() -> Result<(), String> {
     let old_path = get_data_dir().join("pipelines.json");
-    let new_path = get_config_dir().join("pipelines.json");
-    if old_path.exists() && !new_path.exists() {
-        let _ = fs::rename(&old_path, &new_path);
+    let config_dir = get_config_dir();
+    let new_path = config_dir.join("pipelines.json");
+    if new_path.exists() {
+        let mut permissions = fs::metadata(&new_path)
+            .map_err(|e| format!("Failed to inspect pipelines.json: {e}"))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&new_path, permissions)
+            .map_err(|e| format!("Failed to protect pipelines.json: {e}"))?;
+        return Ok(());
     }
+    if !old_path.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("Failed to create pipeline config directory: {e}"))?;
+
+    // A custom recordings directory can live on another filesystem, where a
+    // direct rename is not supported. Fall back to copy + atomic finalize.
+    if fs::rename(&old_path, &new_path).is_ok() {
+        let mut permissions = fs::metadata(&new_path)
+            .map_err(|e| format!("Failed to inspect migrated pipelines.json: {e}"))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&new_path, permissions)
+            .map_err(|e| format!("Failed to protect migrated pipelines.json: {e}"))?;
+        return Ok(());
+    }
+
+    let temp_path = new_path.with_extension("json.migrating");
+    fs::copy(&old_path, &temp_path)
+        .map_err(|e| format!("Failed to copy legacy pipelines.json: {e}"))?;
+    let mut permissions = fs::metadata(&temp_path)
+        .map_err(|e| format!("Failed to inspect migrated pipelines.json: {e}"))?
+        .permissions();
+    permissions.set_mode(0o600);
+    if let Err(error) = fs::set_permissions(&temp_path, permissions) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "Failed to protect migrated pipelines.json: {error}"
+        ));
+    }
+    if let Err(error) = fs::rename(&temp_path, &new_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "Failed to finalize migrated pipelines.json: {error}"
+        ));
+    }
+    if let Err(error) = fs::remove_file(&old_path) {
+        log::warn!(
+            "pipeline storage migration: legacy file remains at {}: {}",
+            old_path.display(),
+            error
+        );
+    }
+    Ok(())
 }
 
 /// Validate a pipeline definition.
@@ -141,6 +202,10 @@ pub fn validate_pipeline(pipeline: &Pipeline) -> Result<(), String> {
         || pipeline.name.contains(':')
     {
         return Err("Pipeline name contains invalid characters (/, \\, :, or null)".to_string());
+    }
+
+    if pipeline.steps.is_empty() {
+        return Err("Pipeline must contain at least one step".to_string());
     }
 
     let mut defined_steps: Vec<String> = Vec::new();
@@ -179,12 +244,11 @@ pub fn validate_pipeline(pipeline: &Pipeline) -> Result<(), String> {
 /// Legacy migration (Option A): pre-simplification pipelines carried steps of
 /// now-removed delivery types (notion / slack / telegram / webhook /
 /// save_local) and a `connection_id` field. We parse loosely first and drop
-/// any step whose type isn't a current [`StepType`] (`cli_agent` / `shell`) —
-/// the leftover cli/shell steps survive, unknown fields like `connection_id`
-/// are ignored by serde. A pipeline that still won't parse is skipped (logged)
-/// rather than nuking the whole file. I/O errors still bubble up.
-pub fn load_pipelines() -> Result<HashMap<String, Pipeline>, String> {
-    migrate_pipelines_if_needed();
+/// any step whose type isn't a current [`StepType`] — the leftover current
+/// steps survive and unknown fields like `connection_id` are ignored by serde.
+/// Invalid JSON or a pipeline that still won't parse is returned as an error so
+/// a later write cannot silently overwrite user data with a partial snapshot.
+fn load_pipelines_from_disk() -> Result<HashMap<String, Pipeline>, String> {
     let path = get_pipelines_path();
 
     if !path.exists() {
@@ -194,30 +258,36 @@ pub fn load_pipelines() -> Result<HashMap<String, Pipeline>, String> {
     let raw =
         fs::read_to_string(&path).map_err(|e| format!("Failed to read pipelines.json: {}", e))?;
 
-    // Loose parse so one bad pipeline doesn't take down the rest.
+    // Parse through Value so removed step types can be pruned before the
+    // strongly typed pass. Any remaining error aborts the snapshot load.
     let map: HashMap<String, serde_json::Value> = match serde_json::from_str(&raw) {
         Ok(m) => m,
-        Err(e) => {
-            log::warn!(
-                "pipelines.json is not a valid object ({}); starting with an empty list.",
-                e
-            );
-            return Ok(HashMap::new());
-        }
+        Err(e) => return Err(format!("pipelines.json is invalid: {e}")),
     };
 
     let mut pipelines = HashMap::new();
     for (name, value) in map {
         match prune_and_parse_pipeline(value) {
-            Ok(p) => {
+            Ok(mut p) => {
+                // The object key is the durable identity in the legacy format.
+                // Normalize an old mismatched embedded name in memory instead
+                // of exposing two identities to callers.
+                p.name = name.clone();
                 pipelines.insert(name, p);
             }
             Err(e) => {
-                log::warn!("Skipping pipeline '{}' — failed to parse ({}).", name, e);
+                return Err(format!("Pipeline '{name}' is invalid: {e}"));
             }
         }
     }
     Ok(pipelines)
+}
+
+pub fn load_pipelines() -> Result<HashMap<String, Pipeline>, String> {
+    let _guard = PIPELINES_LOCK
+        .lock()
+        .map_err(|_| "Pipeline storage lock poisoned".to_string())?;
+    load_pipelines_from_disk()
 }
 
 /// Drop steps of removed networked-delivery types (notion / slack / telegram /
@@ -240,7 +310,7 @@ fn prune_and_parse_pipeline(mut value: serde_json::Value) -> Result<Pipeline, se
 }
 
 /// Save all pipelines to disk
-pub fn save_pipelines_to_disk(pipelines: &HashMap<String, Pipeline>) -> Result<(), String> {
+fn save_pipelines_to_disk_unlocked(pipelines: &HashMap<String, Pipeline>) -> Result<(), String> {
     let config_dir = get_config_dir();
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir)
@@ -248,9 +318,28 @@ pub fn save_pipelines_to_disk(pipelines: &HashMap<String, Pipeline>) -> Result<(
     }
 
     let path = get_pipelines_path();
-    let content = serde_json::to_string_pretty(pipelines)
+    let temp_path = path.with_extension("json.tmp");
+    // Stable key ordering keeps the file reviewable and avoids churn whenever
+    // HashMap iteration order changes.
+    let ordered: BTreeMap<&String, &Pipeline> = pipelines.iter().collect();
+    let content = serde_json::to_string_pretty(&ordered)
         .map_err(|e| format!("Failed to serialize pipelines: {}", e))?;
-    fs::write(&path, content).map_err(|e| format!("Failed to write pipelines.json: {}", e))?;
+    fs::write(&temp_path, content)
+        .map_err(|e| format!("Failed to write temporary pipelines.json: {e}"))?;
+    let mut permissions = fs::metadata(&temp_path)
+        .map_err(|e| format!("Failed to inspect temporary pipelines.json: {e}"))?
+        .permissions();
+    permissions.set_mode(0o600);
+    if let Err(error) = fs::set_permissions(&temp_path, permissions) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!(
+            "Failed to protect temporary pipelines.json: {error}"
+        ));
+    }
+    if let Err(error) = fs::rename(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(format!("Failed to finalize pipelines.json: {error}"));
+    }
 
     Ok(())
 }
@@ -279,21 +368,94 @@ pub fn get_pipeline(name: String) -> Result<Pipeline, String> {
 }
 
 /// Save (create or update) a pipeline definition
+fn rewrite_pipeline_reference(
+    reference: &mut Option<String>,
+    old_name: &str,
+    new_name: Option<&str>,
+) -> bool {
+    if reference.as_deref() != Some(old_name) {
+        return false;
+    }
+    *reference = new_name.map(str::to_string);
+    true
+}
+
+fn rewrite_settings_pipeline_references(
+    settings: &mut AppSettings,
+    old_name: &str,
+    new_name: Option<&str>,
+) -> usize {
+    let mut changed = 0;
+    changed +=
+        rewrite_pipeline_reference(&mut settings.default_pipeline, old_name, new_name) as usize;
+    changed +=
+        rewrite_pipeline_reference(&mut settings.last_used_pipeline, old_name, new_name) as usize;
+    for shortcut in &mut settings.dictation.shortcuts {
+        changed += rewrite_pipeline_reference(&mut shortcut.pipeline, old_name, new_name) as usize;
+    }
+    changed
+}
+
 #[tauri::command]
-pub fn save_pipeline(app: tauri::AppHandle, mut pipeline: Pipeline) -> Result<(), String> {
+pub fn save_pipeline(
+    app: tauri::AppHandle,
+    mut pipeline: Pipeline,
+    previous_name: Option<String>,
+) -> Result<(), String> {
     validate_pipeline(&pipeline)?;
 
-    let mut pipelines = load_pipelines()?;
+    let _guard = PIPELINES_LOCK
+        .lock()
+        .map_err(|_| "Pipeline storage lock poisoned".to_string())?;
+    let mut pipelines = load_pipelines_from_disk()?;
+    let original = pipelines.clone();
+    let previous_name = previous_name.filter(|name| !name.trim().is_empty());
+    let new_name = pipeline.name.clone();
+
+    if let Some(old_name) = previous_name.as_deref() {
+        if !pipelines.contains_key(old_name) {
+            return Err(format!("Pipeline '{old_name}' not found"));
+        }
+        if old_name != pipeline.name && pipelines.contains_key(&pipeline.name) {
+            return Err(format!("Pipeline '{}' already exists", pipeline.name));
+        }
+    } else if pipelines.contains_key(&pipeline.name) {
+        return Err(format!("Pipeline '{}' already exists", pipeline.name));
+    }
+
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    // Preserve created_at if updating existing pipeline
-    if let Some(existing) = pipelines.get(&pipeline.name) {
+    // Preserve created_at across updates and renames.
+    if let Some(existing) = previous_name
+        .as_deref()
+        .and_then(|old_name| pipelines.get(old_name))
+    {
         pipeline.created_at = existing.created_at.clone();
     } else {
         pipeline.created_at = now.clone();
     }
     pipeline.updated_at = now;
+    if let Some(old_name) = previous_name.as_deref()
+        && old_name != pipeline.name
+    {
+        pipelines.remove(old_name);
+    }
     pipelines.insert(pipeline.name.clone(), pipeline);
-    save_pipelines_to_disk(&pipelines)?;
+    save_pipelines_to_disk_unlocked(&pipelines)?;
+
+    // Name-based references live in settings. Update them as part of the same
+    // backend operation; if settings persistence fails, restore the original
+    // definitions so callers never receive an error after a half-rename.
+    if let Some(old_name) = previous_name.as_deref()
+        && old_name != new_name
+    {
+        let mut settings = crate::config::load_settings();
+        if rewrite_settings_pipeline_references(&mut settings, old_name, Some(&new_name)) > 0
+            && let Err(error) = crate::config::save_settings_to_disk(&mut settings)
+        {
+            let _ = save_pipelines_to_disk_unlocked(&original);
+            return Err(format!("Failed to update pipeline references: {error}"));
+        }
+    }
 
     // Live-update tray submenu so the "Record" list reflects the change
     // without an app restart.
@@ -304,14 +466,233 @@ pub fn save_pipeline(app: tauri::AppHandle, mut pipeline: Pipeline) -> Result<()
 /// Delete a pipeline definition
 #[tauri::command]
 pub fn delete_pipeline(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    let mut pipelines = load_pipelines()?;
+    let _guard = PIPELINES_LOCK
+        .lock()
+        .map_err(|_| "Pipeline storage lock poisoned".to_string())?;
+    let mut pipelines = load_pipelines_from_disk()?;
+    let original = pipelines.clone();
     if pipelines.remove(&name).is_none() {
         return Err(format!("Pipeline '{}' not found", name));
     }
-    save_pipelines_to_disk(&pipelines)?;
+    save_pipelines_to_disk_unlocked(&pipelines)?;
+
+    let mut settings = crate::config::load_settings();
+    if rewrite_settings_pipeline_references(&mut settings, &name, None) > 0
+        && let Err(error) = crate::config::save_settings_to_disk(&mut settings)
+    {
+        let _ = save_pipelines_to_disk_unlocked(&original);
+        return Err(format!("Failed to clear pipeline references: {error}"));
+    }
 
     crate::refresh_tray_menu(&app);
     Ok(())
+}
+
+const LEGACY_TAG_PIPELINE_DESCRIPTION: &str = "Label (migrated from tag)";
+
+fn is_legacy_tag_definition(pipeline: &Pipeline) -> bool {
+    pipeline.description == LEGACY_TAG_PIPELINE_DESCRIPTION
+        && pipeline.steps.is_empty()
+        && !pipeline.auto_run
+}
+
+fn sanitize_legacy_tag_name(tag: &str) -> String {
+    tag.replace(['/', '\\', ':', '\0'], "-")
+}
+
+fn is_legacy_tag_state(
+    state: &PipelineState,
+    tag_names: &HashSet<String>,
+    valid_definitions: &HashSet<String>,
+    removed_legacy_definitions: &HashSet<String>,
+) -> bool {
+    let synthetic_shape = state.status == PipelineStatus::Done
+        && state.run_index == 0
+        && state.current_step.is_none()
+        && state.error.is_none()
+        && state.started_at.is_some()
+        && state.started_at == state.completed_at;
+    synthetic_shape
+        && tag_names.contains(&state.name)
+        && (removed_legacy_definitions.contains(&state.name)
+            || !valid_definitions.contains(&state.name))
+}
+
+fn clear_missing_pipeline_references(
+    settings: &mut AppSettings,
+    valid_names: &HashSet<String>,
+) -> usize {
+    fn clear(reference: &mut Option<String>, valid_names: &HashSet<String>) -> bool {
+        if reference
+            .as_ref()
+            .is_some_and(|name| !valid_names.contains(name))
+        {
+            *reference = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    let mut changed = 0;
+    changed += clear(&mut settings.default_pipeline, valid_names) as usize;
+    changed += clear(&mut settings.last_used_pipeline, valid_names) as usize;
+    for shortcut in &mut settings.dictation.shortcuts {
+        changed += clear(&mut shortcut.pipeline, valid_names) as usize;
+    }
+    changed
+}
+
+#[derive(Default, Debug)]
+struct PipelineStorageMigrationStats {
+    definitions_removed: usize,
+    recording_states_removed: usize,
+    recordings_rewritten: usize,
+    settings_references_cleared: usize,
+    malformed_recordings_skipped: usize,
+}
+
+/// Undo the old lazy tag migration. That migration ran from read_metadata /
+/// list_recordings and therefore let a read create global pipeline definitions.
+/// V1 restores the boundaries: obsolete tags and their synthetic pipeline
+/// states are removed, recording pipeline arrays stay real execution history,
+/// and only explicit pipeline-editor actions mutate global definitions.
+fn migrate_pipeline_storage_v1(
+    settings: &mut AppSettings,
+) -> Result<PipelineStorageMigrationStats, String> {
+    let mut stats = PipelineStorageMigrationStats::default();
+
+    let (valid_definitions, removed_legacy_definitions) = {
+        let _guard = PIPELINES_LOCK
+            .lock()
+            .map_err(|_| "Pipeline storage lock poisoned".to_string())?;
+        migrate_pipelines_to_config_dir()?;
+        let mut definitions = load_pipelines_from_disk()?;
+        let legacy: HashSet<String> = definitions
+            .iter()
+            .filter(|(_, pipeline)| is_legacy_tag_definition(pipeline))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !legacy.is_empty() {
+            definitions.retain(|name, _| !legacy.contains(name));
+            save_pipelines_to_disk_unlocked(&definitions)?;
+        }
+        stats.definitions_removed = legacy.len();
+        (definitions.into_keys().collect(), legacy)
+    };
+
+    let data_dir = get_data_dir();
+    if data_dir.exists() {
+        for entry in fs::read_dir(&data_dir)
+            .map_err(|e| format!("Failed to scan recordings for pipeline migration: {e}"))?
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    stats.malformed_recordings_skipped += 1;
+                    continue;
+                }
+            };
+            let metadata_path = entry.path().join("metadata.json");
+            if !metadata_path.is_file() {
+                continue;
+            }
+            let raw = match fs::read_to_string(&metadata_path) {
+                Ok(raw) => raw,
+                Err(_) => {
+                    stats.malformed_recordings_skipped += 1;
+                    continue;
+                }
+            };
+            let raw_json: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(value) => value,
+                Err(error) => {
+                    log::warn!(
+                        "pipeline storage migration: skipping malformed {}: {}",
+                        metadata_path.display(),
+                        error
+                    );
+                    stats.malformed_recordings_skipped += 1;
+                    continue;
+                }
+            };
+            let had_legacy_tags = raw_json.get("tags").is_some();
+            let tag_names: HashSet<String> = raw_json
+                .get("tags")
+                .and_then(|tags| tags.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|tag| tag.as_str())
+                .map(|tag| sanitize_legacy_tag_name(tag))
+                .collect();
+            let mut metadata: RecordingMetadata = match serde_json::from_value(raw_json) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    log::warn!(
+                        "pipeline storage migration: skipping incompatible {}: {}",
+                        metadata_path.display(),
+                        error
+                    );
+                    stats.malformed_recordings_skipped += 1;
+                    continue;
+                }
+            };
+            let before = metadata.pipelines.len();
+            metadata.pipelines.retain(|state| {
+                !is_legacy_tag_state(
+                    state,
+                    &tag_names,
+                    &valid_definitions,
+                    &removed_legacy_definitions,
+                )
+            });
+            let removed = before - metadata.pipelines.len();
+            if removed > 0 || had_legacy_tags {
+                crate::storage::write_metadata(&metadata).map_err(|error| {
+                    format!("Failed to migrate recording {}: {error}", metadata.id)
+                })?;
+                stats.recording_states_removed += removed;
+                stats.recordings_rewritten += 1;
+            }
+        }
+    }
+
+    // Also repairs already-stale references. This makes the migration fully
+    // retryable if an earlier launch removed legacy data but crashed before
+    // settings.json received the schema version.
+    stats.settings_references_cleared =
+        clear_missing_pipeline_references(settings, &valid_definitions);
+    Ok(stats)
+}
+
+/// One-time, schema-versioned startup migration. The version is persisted only
+/// after every required write succeeds, so a crash simply retries the same
+/// idempotent migration on the next launch.
+pub fn run_storage_migration_if_needed() {
+    let mut settings = crate::config::load_settings();
+    if settings.data_schema_version >= CURRENT_DATA_SCHEMA_VERSION {
+        return;
+    }
+
+    match migrate_pipeline_storage_v1(&mut settings) {
+        Ok(stats) => {
+            settings.data_schema_version = CURRENT_DATA_SCHEMA_VERSION;
+            match crate::config::save_settings_to_disk(&mut settings) {
+                Ok(()) => eprintln!(
+                    "Pipeline storage migration v1 complete: removed {} definitions and {} synthetic runs from {} recordings; cleared {} settings references; skipped {} malformed recordings",
+                    stats.definitions_removed,
+                    stats.recording_states_removed,
+                    stats.recordings_rewritten,
+                    stats.settings_references_cleared,
+                    stats.malformed_recordings_skipped,
+                ),
+                Err(error) => eprintln!(
+                    "Warning: pipeline storage migration completed but version could not be saved: {error}"
+                ),
+            }
+        }
+        Err(error) => eprintln!("Warning: pipeline storage migration failed: {error}"),
+    }
 }
 
 #[cfg(test)]
@@ -358,13 +739,13 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_steps_passes() {
+    fn test_empty_steps_fails() {
         let mut pipeline = make_valid_pipeline();
         pipeline.steps = vec![];
         let result = validate_pipeline(&pipeline);
-        assert!(
-            result.is_ok(),
-            "Zero-step pipelines should be valid (labels)"
+        assert_eq!(
+            result.unwrap_err(),
+            "Pipeline must contain at least one step"
         );
     }
 
@@ -451,5 +832,90 @@ mod tests {
         let result = validate_pipeline(&pipeline);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_only_exact_legacy_tag_definition_is_classified() {
+        let legacy = Pipeline {
+            name: "storage".to_string(),
+            description: LEGACY_TAG_PIPELINE_DESCRIPTION.to_string(),
+            steps: vec![],
+            auto_run: false,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert!(is_legacy_tag_definition(&legacy));
+
+        let mut user_created = legacy.clone();
+        user_created.description = "My intentionally empty old pipeline".to_string();
+        assert!(!is_legacy_tag_definition(&user_created));
+
+        let mut with_step = legacy;
+        with_step
+            .steps
+            .push(step("real", StepType::Shell, "echo ok"));
+        assert!(!is_legacy_tag_definition(&with_step));
+    }
+
+    #[test]
+    fn test_legacy_tag_state_requires_exact_synthetic_shape() {
+        let tags = HashSet::from(["storage".to_string()]);
+        let definitions = HashSet::new();
+        let legacy_definitions = HashSet::from(["storage".to_string()]);
+        let timestamp = Some("2026-01-01T00:00:00Z".to_string());
+        let state = PipelineState {
+            id: "legacy-run".to_string(),
+            name: "storage".to_string(),
+            status: PipelineStatus::Done,
+            run_index: 0,
+            started_at: timestamp.clone(),
+            completed_at: timestamp,
+            current_step: None,
+            error: None,
+        };
+        assert!(is_legacy_tag_state(
+            &state,
+            &tags,
+            &definitions,
+            &legacy_definitions
+        ));
+
+        let mut real_run = state;
+        real_run.run_index = 1;
+        assert!(!is_legacy_tag_state(
+            &real_run,
+            &tags,
+            &definitions,
+            &legacy_definitions
+        ));
+    }
+
+    #[test]
+    fn test_missing_settings_references_are_cleared() {
+        let mut settings = AppSettings::default();
+        settings.default_pipeline = Some("kept".to_string());
+        settings.last_used_pipeline = Some("gone".to_string());
+        settings
+            .dictation
+            .shortcuts
+            .push(crate::config::DictationShortcut {
+                id: "shortcut".to_string(),
+                name: "Shortcut".to_string(),
+                hotkey: "cmd+e".to_string(),
+                input_source: crate::config::DictationInputSource::Audio,
+                device_name: None,
+                language: None,
+                pipeline: Some("gone".to_string()),
+                auto_paste: true,
+                capture_system_audio: false,
+                trigger_mode: crate::config::DictationTriggerMode::Toggle,
+            });
+
+        let changed =
+            clear_missing_pipeline_references(&mut settings, &HashSet::from(["kept".to_string()]));
+        assert_eq!(changed, 2);
+        assert_eq!(settings.default_pipeline.as_deref(), Some("kept"));
+        assert_eq!(settings.last_used_pipeline, None);
+        assert_eq!(settings.dictation.shortcuts[0].pipeline, None);
     }
 }

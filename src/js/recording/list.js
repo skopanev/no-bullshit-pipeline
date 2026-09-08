@@ -180,8 +180,8 @@ function buildRowHtml(rec) {
     ? `<span class="app-icon" data-bundle="${escapeHtml(rec.app_bundle_id)}">${DEFAULT_APP_ICON_SVG}</span>`
     : `<span class="app-icon app-icon-resolved">${NBP_WAVEFORM_SVG}</span>`;
 
-  // Pipeline tags with step chips
-  const pipelineTags = (rec.pipelines || []).map(p => {
+  // Pipeline run history with step chips
+  const pipelineRuns = (rec.pipelines || []).map(p => {
     const statusClass = p.status === 'Done' ? 'tag-done' : p.status === 'Partial' ? 'tag-partial' : p.status === 'Running' ? 'tag-running' : 'tag-waiting';
     const def = allPipelineDefs ? allPipelineDefs.find(d => d.name === p.name) : null;
     const flowHtml = def && def.steps && def.steps.length > 0
@@ -219,7 +219,7 @@ function buildRowHtml(rec) {
           </div>
         </div>
         ${previewHtml}
-        ${pipelineTags ? `<div class="recording-pipeline-tags">${pipelineTags}</div>` : ''}
+        ${pipelineRuns ? `<div class="recording-pipeline-runs">${pipelineRuns}</div>` : ''}
         ${copyBtnHtml}
         ${runPipelineBtnHtml}
         ${deleteBtnHtml}

@@ -20,7 +20,7 @@
 //! costs ~600 MB resident RSS permanently and a 250–350 LOC refactor. This
 //! wake-prewarm is ~50 LOC, costs zero idle RAM, and validates the
 //! "sleep purges the cache" hypothesis cheaply. If the post-wake cliff
-//! persists with this in place, the existing `TIMING:asrModels.loadModels`
+//! persists with this in place, the existing `TIMING:asrModels.loadFromCache`
 //! / `TIMING:asrManager.transcribe` stderr lines from the next slow run
 //! tell us which layer to attack next — and *then* we have data for daemon
 //! vs other approaches.

@@ -19,6 +19,10 @@ use tauri::Emitter;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandEvent;
 
+/// Model updates are process-global: only one sidecar may own the stable
+/// staging directory at a time, regardless of which UI button triggered it.
+static DOWNLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Persisted per "engine:variant" version state (`~/.nbp/asr-models.json`).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct ModelVersionEntry {
@@ -91,12 +95,14 @@ pub async fn list_asr_models(
         .map_err(|e| format!("parse --list-models: {} (raw: {})", e, stdout.trim()))
 }
 
-/// Ask the sidecar whether the active engine/variant is cached + its HF repo id.
+/// Ask the sidecar whether the active engine/variant is cached, its HF repo id,
+/// and (for models installed by the atomic updater) the revision marker that
+/// moved into place with the model directory.
 async fn sidecar_status(
     app: &tauri::AppHandle,
     engine: &str,
     variant: &str,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, Option<String>), String> {
     let output = app
         .shell()
         .sidecar("fluidaudio-sidecar")
@@ -110,11 +116,13 @@ async fn sidecar_status(
     struct StatusOut {
         repo: String,
         cached: bool,
+        #[serde(default)]
+        installed_sha: Option<String>,
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: StatusOut = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("parse --status: {} (raw: {})", e, stdout.trim()))?;
-    Ok((parsed.cached, parsed.repo))
+    Ok((parsed.cached, parsed.repo, parsed.installed_sha))
 }
 
 /// Real facts pulled straight from the HF model card — no embellishment.
@@ -215,7 +223,7 @@ pub async fn get_asr_model_state(
         return Ok(unmanaged());
     };
 
-    let (cached, repo) = sidecar_status(&app, &engine, &variant).await?;
+    let (cached, repo, installed_marker) = sidecar_status(&app, &engine, &variant).await?;
     let key = format!("{}:{}", engine, variant);
 
     if !cached {
@@ -233,6 +241,14 @@ pub async fn get_asr_model_state(
 
     let mut store = load_store();
     let mut entry = store.get(&key).cloned().unwrap_or_default();
+
+    // The marker is part of the atomically installed directory, so it is more
+    // authoritative than the separate JSON store. This also repairs a crash
+    // between the sidecar swap and Rust persisting the successful update.
+    if let Some(installed_sha) = installed_marker {
+        entry.installed_sha = Some(installed_sha);
+        entry.inferred = false;
+    }
 
     // Throttle network checks to once per 24h unless forced.
     let now = chrono::Utc::now().timestamp();
@@ -309,13 +325,58 @@ struct AsrDownloadProgress {
     percent: u32,
 }
 
+fn parse_download_progress(line: &str) -> Option<AsrDownloadProgress> {
+    let rest = line.trim().strip_prefix("PROGRESS:")?;
+    let (stage, percent) = rest.rsplit_once(':')?;
+    Some(AsrDownloadProgress {
+        stage: stage.to_string(),
+        percent: percent.parse().ok()?,
+    })
+}
+
+fn emit_download_progress(app: &tauri::AppHandle, line: &str) {
+    if let Some(progress) = parse_download_progress(line) {
+        let _ = app.emit("asr-download-progress", progress);
+    }
+}
+
 /// Download (force=false) or update (force=true) the ACTIVE model via the
-/// sidecar (FluidAudio does the actual fetch). Forwards coarse progress as
-/// `asr-download-progress` events; records the new sha on success.
+/// sidecar. The sidecar owns staging, full model validation, and the atomic
+/// directory swap; Rust resolves the target revision and persists it only
+/// after the sidecar reports success.
 #[tauri::command]
 pub async fn download_asr_model(app: tauri::AppHandle, force: bool) -> Result<(), String> {
+    let _download_guard = DOWNLOAD_LOCK
+        .try_lock()
+        .map_err(|_| "A model download is already in progress".to_string())?;
+
     let Some((engine, variant)) = active_engine() else {
         return Err("Active engine is not a managed on-device model".into());
+    };
+
+    let (_, repo, _) = sidecar_status(&app, &engine, &variant).await?;
+    let key = format!("{}:{}", engine, variant);
+
+    // Resolve the revision before staging starts. Passing it to the sidecar
+    // makes an interrupted stage safely resumable only for that same target.
+    // If HF metadata is temporarily unavailable, fall back to the last known
+    // revision; the actual download can still succeed through FluidAudio.
+    let (target_sha, target_info) = match fetch_repo_meta(&repo).await {
+        Ok((sha, info)) => {
+            let mut store = load_store();
+            let mut entry = store.get(&key).cloned().unwrap_or_default();
+            entry.latest_sha = Some(sha.clone());
+            entry.info = Some(info.clone());
+            entry.checked_at = Some(chrono::Utc::now().timestamp());
+            store.insert(key.clone(), entry);
+            save_store(&store);
+            (Some(sha), Some(info))
+        }
+        Err(error) => {
+            log::warn!("asr update: could not resolve latest sha for {repo}: {error}");
+            let entry = load_store().get(&key).cloned().unwrap_or_default();
+            (entry.latest_sha, entry.info)
+        }
     };
 
     let mut args: Vec<String> = vec![
@@ -328,10 +389,14 @@ pub async fn download_asr_model(app: tauri::AppHandle, force: bool) -> Result<()
     if force {
         args.push("--force".into());
     }
+    if let Some(sha) = &target_sha {
+        args.push("--target-sha".into());
+        args.push(sha.clone());
+    }
 
     // `_child` is held for the lifetime of the event loop so the sidecar isn't
-    // dropped mid-download. No cancel path — if the app is killed, the next
-    // launch re-pulls (FluidAudio skips already-complete files).
+    // dropped mid-download. If the app is killed, the live model is untouched
+    // and the SHA-marked stage can resume on the next attempt.
     let (mut rx, _child) = app
         .shell()
         .sidecar("fluidaudio-sidecar")
@@ -342,26 +407,17 @@ pub async fn download_asr_model(app: tauri::AppHandle, force: bool) -> Result<()
 
     let mut exit_code: Option<i32> = None;
     let mut stderr_tail = String::new();
+    let mut stderr_pending = String::new();
     while let Some(ev) = rx.recv().await {
         match ev {
             CommandEvent::Stderr(d) => {
-                let line = String::from_utf8_lossy(&d);
-                stderr_tail.push_str(&line);
-                for l in line.lines() {
-                    if let Some(rest) = l.strip_prefix("PROGRESS:") {
-                        let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                        if parts.len() == 2
-                            && let Ok(pct) = parts[1].parse::<u32>()
-                        {
-                            let _ = app.emit(
-                                "asr-download-progress",
-                                AsrDownloadProgress {
-                                    stage: parts[0].to_string(),
-                                    percent: pct,
-                                },
-                            );
-                        }
-                    }
+                let chunk = String::from_utf8_lossy(&d);
+                stderr_tail.push_str(&chunk);
+                stderr_pending.push_str(&chunk);
+                while let Some(newline) = stderr_pending.find('\n') {
+                    let line = stderr_pending[..newline].trim_end_matches('\r').to_string();
+                    stderr_pending.drain(..=newline);
+                    emit_download_progress(&app, &line);
                 }
             }
             CommandEvent::Terminated(payload) => {
@@ -370,6 +426,9 @@ pub async fn download_asr_model(app: tauri::AppHandle, force: bool) -> Result<()
             }
             _ => {}
         }
+    }
+    if !stderr_pending.is_empty() {
+        emit_download_progress(&app, &stderr_pending);
     }
 
     if exit_code != Some(0) {
@@ -380,20 +439,33 @@ pub async fn download_asr_model(app: tauri::AppHandle, force: bool) -> Result<()
         ));
     }
 
-    // Record the freshly-installed sha as authoritative (not inferred). Repo id
-    // comes from the sidecar (FluidAudio's Repo enum) — single source of truth,
-    // so our version check can't drift from what FluidAudio actually downloads.
-    if let Ok((_, repo)) = sidecar_status(&app, &engine, &variant).await
+    // Prefer the marker that moved atomically with the model. It survives a
+    // crash immediately after install and is the sidecar's authoritative view.
+    let marker_sha = sidecar_status(&app, &engine, &variant)
+        .await
+        .ok()
+        .and_then(|(_, _, sha)| sha);
+    let mut installed_sha = marker_sha.or(target_sha);
+    let mut installed_info = target_info;
+    if installed_sha.is_none()
         && let Ok((sha, info)) = fetch_repo_meta(&repo).await
     {
-        let key = format!("{}:{}", engine, variant);
+        installed_sha = Some(sha);
+        installed_info = Some(info);
+    }
+
+    if let Some(sha) = installed_sha {
         let mut store = load_store();
         let mut entry = store.get(&key).cloned().unwrap_or_default();
         entry.installed_sha = Some(sha.clone());
-        entry.latest_sha = Some(sha);
-        entry.info = Some(info);
         entry.inferred = false;
-        entry.checked_at = Some(chrono::Utc::now().timestamp());
+        if entry.latest_sha.is_none() {
+            entry.latest_sha = Some(sha);
+        }
+        if let Some(info) = installed_info {
+            entry.info = Some(info);
+        }
+        entry.dismissed_sha = None;
         store.insert(key, entry);
         save_store(&store);
     }
@@ -406,4 +478,21 @@ pub async fn download_asr_model(app: tauri::AppHandle, force: bool) -> Result<()
         },
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_download_progress;
+
+    #[test]
+    fn parses_complete_progress_line() {
+        let progress = parse_download_progress("PROGRESS:Verifying:90\r").unwrap();
+        assert_eq!(progress.stage, "Verifying");
+        assert_eq!(progress.percent, 90);
+    }
+
+    #[test]
+    fn ignores_non_progress_stderr() {
+        assert!(parse_download_progress("FluidAudio: loading model").is_none());
+    }
 }

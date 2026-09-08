@@ -38,6 +38,7 @@ pub mod audio_processing;
 mod calendar;
 mod call_detector;
 mod call_session;
+mod capture_coordinator;
 pub mod config;
 mod connectors;
 mod devices;
@@ -166,35 +167,14 @@ fn maybe_sweep_retention(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    // GUI apps launched through Finder/Spotlight do not inherit PATH from the
-    // user's shell startup files. Restore it before Tauri starts any worker
-    // threads so CLI-agent availability checks and execution see the same
-    // binaries as a terminal session.
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    let path_fix_error = fix_path_env::fix().err().map(|error| error.to_string());
-
-    // Logging is initialized below via tauri-plugin-log (stdout + a log file in
-    // the OS log dir), so release builds keep durable logs a user can send.
-
-    // Disable App Nap. Without this macOS throttles backgrounded tray apps
-    // and Carbon HotKey events get queued for tens of seconds (or minutes)
-    // before delivery — the user presses cmd+shift+b and the HUD only shows
-    // up much later. `NSAppSleepDisabled` in Info.plist works for signed
-    // bundles but not dev binaries, so we ask runtime-style. Token must
-    // outlive the process; leak it.
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-        let info = NSProcessInfo::processInfo();
-        let reason = NSString::from_str("Global hotkey listener — Quick Dictate");
-        let token = info.beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &reason);
-        std::mem::forget(token);
-    }
-
-    // Load settings for managed state
-    let settings = std::sync::Arc::new(std::sync::Mutex::new(config::load_settings()));
-
     tauri::Builder::default()
+        // Must be the first plugin: plugin setup runs in registration order.
+        // A secondary process exits here before it can touch settings, run
+        // migrations, register hotkeys, or start audio/call detectors.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            log::info!("single-instance: activating the existing NBP window");
+            show_main_window(app);
+        }))
         // Logging: write to BOTH stdout (visible under `bun run dev`) and a
         // rotating file in the OS log dir (`~/Library/Logs/one.nbp.skk/`) so a
         // user on a notarized release build — which has no stderr — can grab and
@@ -217,13 +197,6 @@ pub fn run() {
                 .level_for("nbp_lib", log::LevelFilter::Debug)
                 .build(),
         )
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Focus the existing window when a second instance is launched
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // tauri-plugin-window-state removed: on fractionally-scaled displays
@@ -238,12 +211,34 @@ pub fn run() {
         .manage(permissions::PermissionsStateCache(std::sync::Arc::new(
             std::sync::Mutex::new(permissions::PermissionsState::default()),
         )))
-        .manage(settings)
-        .setup(move |app| {
+        .setup(|app| {
+            // Everything below runs only in the primary process: the first
+            // plugin has already rejected and terminated any second launch.
+
+            // GUI apps launched through Finder/Spotlight do not inherit PATH
+            // from the user's shell. Restore it before starting workers so
+            // pipeline CLI discovery matches a terminal session.
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-            if let Some(error) = &path_fix_error {
+            if let Err(error) = fix_path_env::fix() {
                 log::warn!("startup: failed to restore shell PATH: {error}");
             }
+
+            // Disable App Nap. Without this macOS throttles backgrounded tray
+            // apps and queues Carbon hotkey events. The token must outlive the
+            // process, so intentionally leak it in the primary instance.
+            #[cfg(target_os = "macos")]
+            {
+                use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+                let info = NSProcessInfo::processInfo();
+                let reason = NSString::from_str("Global hotkey listener — Quick Dictate");
+                let token =
+                    info.beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &reason);
+                std::mem::forget(token);
+            }
+
+            // One-shot storage cleanup must happen after the single-instance
+            // gate but before any settings consumers or shortcut registration.
+            pipelines::run_storage_migration_if_needed();
 
             // Ensure the app appears in Dock and Cmd+Tab
             #[cfg(target_os = "macos")]
@@ -432,11 +427,8 @@ pub fn run() {
             audio::resume_recording,
             storage::list_recordings,
             storage::read_metadata,
-            storage::update_tags,
             storage::update_title,
             storage::delete_recording,
-            storage::list_projects,
-            storage::save_projects,
             permissions::check_permissions,
             permissions::request_mic_permission,
             permissions::request_system_audio_permission,
@@ -563,42 +555,34 @@ pub fn run() {
 /// RunEvent::ExitRequested handler), so audio is released cleanly instead of
 /// relying on Drop, which may not run at process exit.
 fn graceful_audio_shutdown(app: &tauri::AppHandle) {
-    // Stop the tray-icon blink on every quit path (Cmd+Q / tray Quit / Exit) so
-    // a pulse thread isn't left scheduling icon swaps into a tearing-down app.
-    stop_tray_pulse();
+    // Cancel dictation through its real teardown path. In the post-capture
+    // phase this also aborts the sidecar/pipeline before process exit.
+    let dictation_active = app
+        .state::<dictation::DictationState>()
+        .is_active
+        .load(std::sync::atomic::Ordering::Acquire);
+    let dictation_processing = matches!(
+        capture_coordinator::snapshot(),
+        capture_coordinator::CaptureActivity::StartingDictation { .. }
+            | capture_coordinator::CaptureActivity::Dictating { .. }
+            | capture_coordinator::CaptureActivity::DictationProcessing { .. }
+    );
+    if dictation_active {
+        dictation::cancel_inner(app);
+    } else if dictation_processing {
+        dictation::force_hide_hud(app);
+    }
+
+    // Use the normal recording stop path so metadata is finalized and the
+    // recording does not remain permanently marked as `recording` after Quit.
     let state = app.state::<AudioState>();
-    {
-        let is_recording = state.is_recording.lock().unwrap_or_else(|e| e.into_inner());
-        if *is_recording {
-            drop(is_recording);
-            let mut mic = state.mic_recorder.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(mut r) = mic.take() {
-                r.stop();
-            }
-            let mut sys = state
-                .system_recorder
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(mut r) = sys.take() {
-                r.stop();
-            }
-            let mut rt = state
-                .realtime_transcriber
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(mut h) = rt.take() {
-                h.stop();
-            }
-            let mut mix = state
-                .realtime_mixer
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(mut m) = mix.take() {
-                m.stop();
-            }
-        }
+    let recording_active = *state.is_recording.lock().unwrap_or_else(|e| e.into_inner());
+    if recording_active && let Err(e) = audio::stop_recording(app.clone(), state.clone()) {
+        log::warn!("graceful shutdown: failed to stop recording: {e}");
     }
     state.wait_for_finalization();
+    // Belt-and-suspenders cleanup for every quit path (Cmd+Q / tray / Exit).
+    stop_tray_pulse();
 }
 
 /// Per-shortcut registration result returned to the frontend so it can show
@@ -613,10 +597,25 @@ pub struct ShortcutRegistration {
     pub error: Option<String>,
 }
 
+/// Registration and Settings hotkey-capture both mutate the process-global
+/// Carbon/CGEventTap bindings. Serialize those transitions so a blur/save race
+/// cannot restore an older binding set over a freshly saved one.
+static SHORTCUT_REGISTRATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Unregister all current dictation hotkeys and re-register from the live settings.
 /// Returns a per-shortcut status array so the UI can render conflicts.
 #[cfg(desktop)]
 pub fn reload_dictation_shortcuts(
+    app: &tauri::AppHandle,
+) -> Result<Vec<ShortcutRegistration>, String> {
+    let _guard = SHORTCUT_REGISTRATION_LOCK
+        .lock()
+        .map_err(|_| "Shortcut registration lock poisoned".to_string())?;
+    reload_dictation_shortcuts_locked(app)
+}
+
+#[cfg(desktop)]
+fn reload_dictation_shortcuts_locked(
     app: &tauri::AppHandle,
 ) -> Result<Vec<ShortcutRegistration>, String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -780,13 +779,29 @@ pub fn reload_dictation_shortcuts(
 /// Accessibility isn't granted (the tap can't be created, so Fn won't capture).
 #[tauri::command]
 fn dictation_fn_capture_start(app: tauri::AppHandle) -> bool {
-    fn_hotkey::set_capture(&app, true)
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let Ok(_guard) = SHORTCUT_REGISTRATION_LOCK.lock() else {
+        return false;
+    };
+    // Arm Fn capture first so an Fn edge cannot slip through while regular
+    // Carbon bindings are being removed. Existing shortcuts remain in config;
+    // only their live registrations are suspended during field capture.
+    let fn_ready = fn_hotkey::set_capture(&app, true);
+    let _ = app.global_shortcut().unregister_all();
+    fn_ready
 }
 
 /// Disarm Fn capture mode (hotkey field blurred / editor closed).
 #[tauri::command]
 fn dictation_fn_capture_stop(app: tauri::AppHandle) {
+    let Ok(_guard) = SHORTCUT_REGISTRATION_LOCK.lock() else {
+        return;
+    };
     fn_hotkey::set_capture(&app, false);
+    if let Err(error) = reload_dictation_shortcuts_locked(&app) {
+        log::warn!("dictation: failed to restore shortcuts after capture: {error}");
+    }
 }
 
 /// Open System Settings → Privacy & Security → Accessibility so the user can
@@ -1078,63 +1093,259 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Build the system tray icon with menu
-/// Build the tray menu from current pipelines + settings. Extracted so it
-/// can be re-invoked when pipelines change (see `refresh_tray_menu`).
+/// Menu-item handle for the live `● Recording · 00:12` row. Rebuilding the
+/// entire native menu every second can close an open menu; updating this one
+/// disabled row in place is cheap and stable.
+static TRAY_STATUS_ITEM: std::sync::Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>> =
+    std::sync::Mutex::new(None);
+
+fn remember_tray_status(item: Option<&tauri::menu::MenuItem<tauri::Wry>>) {
+    *TRAY_STATUS_ITEM.lock().unwrap_or_else(|e| e.into_inner()) = item.cloned();
+}
+
+fn elapsed_label(started_at: std::time::Instant) -> String {
+    let seconds = started_at.elapsed().as_secs();
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn dictation_detail(context: &capture_coordinator::DictationContext) -> String {
+    let destination = if context.auto_paste {
+        "Auto-paste"
+    } else {
+        "Copy"
+    };
+    match context.pipeline.as_deref() {
+        Some(pipeline) => format!("{} → {} · {}", context.name, pipeline, destination),
+        None => format!("{} · {}", context.name, destination),
+    }
+}
+
+fn tray_status_item(
+    app: &tauri::AppHandle,
+    text: impl AsRef<str>,
+) -> Result<tauri::menu::MenuItem<tauri::Wry>, tauri::Error> {
+    let item = MenuItemBuilder::with_id("tray-status", text.as_ref())
+        .enabled(false)
+        .build(app)?;
+    remember_tray_status(Some(&item));
+    Ok(item)
+}
+
+/// Build the tray from the authoritative capture state. Start actions exist
+/// only while idle; recording/dictation replace them with controls relevant to
+/// the live operation. Pipeline order is deterministic: last used, default,
+/// then the remaining names alphabetically, with no silent cap.
 fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, tauri::Error> {
-    use tauri::menu::{Menu, PredefinedMenuItem};
+    use capture_coordinator::{CaptureActivity, DictationPhase};
 
-    // Record submenu — "New Record" first (no pipeline), then a separator,
-    // then a flat list of available pipelines (last-used + default surfaced
-    // first, capped at 5 to keep the menu readable).
-    let new_record_item = MenuItemBuilder::with_id("tray-record-new", "New Record").build(app)?;
-    let mut record_submenu = SubmenuBuilder::new(app, "Record")
-        .item(&new_record_item)
-        .separator();
+    remember_tray_status(None);
+    let open_item = MenuItemBuilder::with_id("show", "Open NBP").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit NBP").build(app)?;
 
-    let pipeline_items: Vec<tauri::menu::MenuItem<tauri::Wry>> = match pipelines::load_pipelines() {
-        Ok(pipeline_list) => {
-            let settings = config::load_settings();
-            let mut names: Vec<String> = Vec::new();
-            if let Some(ref last) = settings.last_used_pipeline
-                && pipeline_list.contains_key(last)
-            {
-                names.push(last.clone());
-            }
-            if let Some(ref default) = settings.default_pipeline
-                && pipeline_list.contains_key(default)
-                && !names.contains(default)
-            {
-                names.push(default.clone());
-            }
-            for name in pipeline_list.keys() {
-                if !names.contains(name) {
-                    names.push(name.clone());
+    match capture_coordinator::snapshot() {
+        CaptureActivity::Idle => {
+            let start_item =
+                MenuItemBuilder::with_id("tray-record-new", "Start Recording").build(app)?;
+
+            let mut pipeline_submenu = SubmenuBuilder::new(app, "Start with Pipeline");
+            let mut pipeline_count = 0usize;
+            if let Ok(pipeline_list) = pipelines::load_pipelines() {
+                let settings = config::load_settings();
+                let mut names = Vec::new();
+                if let Some(last) = settings.last_used_pipeline
+                    && pipeline_list.contains_key(&last)
+                {
+                    names.push(last);
+                }
+                if let Some(default) = settings.default_pipeline
+                    && pipeline_list.contains_key(&default)
+                    && !names.contains(&default)
+                {
+                    names.push(default);
+                }
+                let mut remaining: Vec<_> = pipeline_list
+                    .keys()
+                    .filter(|name| !names.contains(name))
+                    .cloned()
+                    .collect();
+                remaining.sort_by(|a, b| {
+                    a.to_lowercase()
+                        .cmp(&b.to_lowercase())
+                        .then_with(|| a.cmp(b))
+                });
+                names.extend(remaining);
+
+                for name in names {
+                    let item = MenuItemBuilder::with_id(format!("pipeline:{name}"), name.as_str())
+                        .build(app)?;
+                    pipeline_submenu = pipeline_submenu.item(&item);
+                    pipeline_count += 1;
                 }
             }
-            names.truncate(5);
-            names
-                .iter()
-                .filter_map(|name| {
-                    MenuItemBuilder::with_id(format!("pipeline:{}", name), format!("▶ {}", name))
-                        .build(app)
-                        .ok()
-                })
-                .collect()
+            if pipeline_count > 0 {
+                pipeline_submenu = pipeline_submenu.separator();
+            }
+            let manage_item =
+                MenuItemBuilder::with_id("tray-manage-pipelines", "Manage Pipelines…")
+                    .build(app)?;
+            let pipeline_submenu = pipeline_submenu.item(&manage_item).build()?;
+            let settings_item =
+                MenuItemBuilder::with_id("tray-settings", "Settings…").build(app)?;
+
+            MenuBuilder::new(app)
+                .item(&start_item)
+                .item(&pipeline_submenu)
+                .separator()
+                .item(&open_item)
+                .item(&settings_item)
+                .separator()
+                .item(&quit_item)
+                .build()
         }
-        Err(_) => Vec::new(),
-    };
-    for item in &pipeline_items {
-        record_submenu = record_submenu.item(item);
+        CaptureActivity::StartingRecording { .. } => {
+            let status = tray_status_item(app, "Starting Recording…")?;
+            MenuBuilder::new(app)
+                .item(&status)
+                .separator()
+                .item(&open_item)
+                .separator()
+                .item(&quit_item)
+                .build()
+        }
+        CaptureActivity::Recording {
+            id,
+            title,
+            started_at,
+            ..
+        } => {
+            let status =
+                tray_status_item(app, format!("● Recording · {}", elapsed_label(started_at)))?;
+            let title_item = MenuItemBuilder::with_id("tray-recording-title", title)
+                .enabled(false)
+                .build(app)?;
+            let stop_item =
+                MenuItemBuilder::with_id("tray-stop-recording", "Stop & Save Recording")
+                    .build(app)?;
+            let open_recording_item = MenuItemBuilder::with_id(
+                format!("tray-open-recording:{id}"),
+                "Open Current Recording",
+            )
+            .build(app)?;
+            let quit_after_save =
+                MenuItemBuilder::with_id("quit", "Quit After Saving…").build(app)?;
+
+            MenuBuilder::new(app)
+                .item(&status)
+                .item(&title_item)
+                .separator()
+                .item(&stop_item)
+                .item(&open_recording_item)
+                .separator()
+                .item(&quit_after_save)
+                .build()
+        }
+        CaptureActivity::FinishingRecording { id, title, .. } => {
+            let status = tray_status_item(app, "Saving Recording…")?;
+            let title_item = MenuItemBuilder::with_id("tray-recording-title", title)
+                .enabled(false)
+                .build(app)?;
+            let open_recording_item = MenuItemBuilder::with_id(
+                format!("tray-open-recording:{id}"),
+                "Open Current Recording",
+            )
+            .build(app)?;
+            let quit_after_save =
+                MenuItemBuilder::with_id("quit", "Quit After Saving…").build(app)?;
+
+            MenuBuilder::new(app)
+                .item(&status)
+                .item(&title_item)
+                .separator()
+                .item(&open_recording_item)
+                .separator()
+                .item(&quit_after_save)
+                .build()
+        }
+        CaptureActivity::StartingDictation { context, .. } => {
+            let status = tray_status_item(app, "Starting Dictation…")?;
+            let detail =
+                MenuItemBuilder::with_id("tray-dictation-detail", dictation_detail(&context))
+                    .enabled(false)
+                    .build(app)?;
+            let cancel =
+                MenuItemBuilder::with_id("tray-cancel-dictation", "Cancel Dictation").build(app)?;
+            MenuBuilder::new(app)
+                .item(&status)
+                .item(&detail)
+                .separator()
+                .item(&cancel)
+                .item(&open_item)
+                .separator()
+                .item(&quit_item)
+                .build()
+        }
+        CaptureActivity::Dictating {
+            context,
+            started_at,
+            ..
+        } => {
+            let status =
+                tray_status_item(app, format!("● Dictating · {}", elapsed_label(started_at)))?;
+            let detail =
+                MenuItemBuilder::with_id("tray-dictation-detail", dictation_detail(&context))
+                    .enabled(false)
+                    .build(app)?;
+            let stop_label = if context.auto_paste {
+                "Stop & Paste"
+            } else {
+                "Stop & Copy"
+            };
+            let stop = MenuItemBuilder::with_id("tray-stop-dictation", stop_label).build(app)?;
+            let cancel =
+                MenuItemBuilder::with_id("tray-cancel-dictation", "Cancel Dictation").build(app)?;
+            MenuBuilder::new(app)
+                .item(&status)
+                .item(&detail)
+                .separator()
+                .item(&stop)
+                .item(&cancel)
+                .item(&open_item)
+                .separator()
+                .item(&quit_item)
+                .build()
+        }
+        CaptureActivity::DictationProcessing { context, phase, .. } => {
+            let status_text = match phase {
+                DictationPhase::ReadingClipboard => "Reading Clipboard…",
+                DictationPhase::Transcribing => "Transcribing Dictation…",
+                DictationPhase::Processing => "Running Pipeline…",
+                DictationPhase::Pasting if context.auto_paste => "Pasting…",
+                DictationPhase::Pasting => "Copying…",
+            };
+            let status = tray_status_item(app, status_text)?;
+            let detail =
+                MenuItemBuilder::with_id("tray-dictation-detail", dictation_detail(&context))
+                    .enabled(false)
+                    .build(app)?;
+            let cancel = MenuItemBuilder::with_id("tray-cancel-dictation", "Cancel").build(app)?;
+            MenuBuilder::new(app)
+                .item(&status)
+                .item(&detail)
+                .separator()
+                .item(&cancel)
+                .item(&open_item)
+                .separator()
+                .item(&quit_item)
+                .build()
+        }
     }
-    let record_submenu = record_submenu.build()?;
-
-    // Top-level items: Record submenu → Home → separator → Quit.
-    let home_item = MenuItemBuilder::with_id("show", "Home").build(app)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-
-    Menu::with_items(app, &[&record_submenu, &home_item, &separator, &quit_item])
 }
 
 /// Re-fetch pipelines and swap the tray menu live. Called by
@@ -1150,6 +1361,7 @@ pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
             if let Err(e) = tray.set_menu(Some(menu)) {
                 log::warn!("refresh_tray_menu: set_menu failed: {}", e);
             }
+            update_tray_capture_display(app);
         }
         Err(e) => {
             log::warn!("refresh_tray_menu: build_tray_menu failed: {}", e);
@@ -1159,6 +1371,58 @@ pub(crate) fn refresh_tray_menu(app: &tauri::AppHandle) {
 
 /// Stable id we use to look the tray up at runtime for menu refresh.
 const TRAY_ID: &str = "nbp-main";
+
+/// Update the one live status row without replacing the native menu. Called by
+/// the existing 600ms recording pulse, so elapsed time stays current with no
+/// second timer or extra wakeups.
+fn update_tray_capture_display(app: &tauri::AppHandle) {
+    use capture_coordinator::CaptureActivity;
+
+    let (status, tooltip) = match capture_coordinator::snapshot() {
+        CaptureActivity::Recording { started_at, .. } => (
+            Some(format!("● Recording · {}", elapsed_label(started_at))),
+            "NBP — Recording",
+        ),
+        CaptureActivity::Dictating { started_at, .. } => (
+            Some(format!("● Dictating · {}", elapsed_label(started_at))),
+            "NBP — Dictating",
+        ),
+        CaptureActivity::StartingRecording { .. } => (
+            Some("Starting Recording…".into()),
+            "NBP — Starting recording",
+        ),
+        CaptureActivity::FinishingRecording { .. } => {
+            (Some("Saving Recording…".into()), "NBP — Saving recording")
+        }
+        CaptureActivity::StartingDictation { .. } => (
+            Some("Starting Dictation…".into()),
+            "NBP — Starting dictation",
+        ),
+        CaptureActivity::DictationProcessing { context, phase, .. } => {
+            let label = match phase {
+                capture_coordinator::DictationPhase::ReadingClipboard => "Reading Clipboard…",
+                capture_coordinator::DictationPhase::Transcribing => "Transcribing Dictation…",
+                capture_coordinator::DictationPhase::Processing => "Running Pipeline…",
+                capture_coordinator::DictationPhase::Pasting if context.auto_paste => "Pasting…",
+                capture_coordinator::DictationPhase::Pasting => "Copying…",
+            };
+            (Some(label.into()), "NBP — Processing dictation")
+        }
+        CaptureActivity::Idle => (None, "NBP"),
+    };
+
+    if let Some(text) = status
+        && let Some(item) = TRAY_STATUS_ITEM
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+    {
+        let _ = item.set_text(text);
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
+}
 
 /// Force-recreate the tray's NSStatusItem if macOS has orphaned it.
 ///
@@ -1283,6 +1547,7 @@ pub(crate) fn start_tray_pulse(app: &tauri::AppHandle) {
                 if let Some(tray) = app.tray_by_id(TRAY_ID) {
                     let _ = tray.set_icon(Some(icon));
                 }
+                update_tray_capture_display(&app);
             });
         };
         let mut show_border = true;
@@ -1388,6 +1653,12 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.emit("tray-start-pipeline", pipeline_name);
                 }
+            } else if let Some(recording_id) = id.strip_prefix("tray-open-recording:") {
+                let recording_id = recording_id.to_string();
+                show_main_window(app);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("tray-open-recording", recording_id);
+                }
             } else {
                 match id {
                     "tray-record-new" => {
@@ -1398,6 +1669,49 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                         show_main_window(app);
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.emit("tray-record-new", ());
+                        }
+                    }
+                    "tray-stop-recording" => {
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            let state = app.state::<AudioState>();
+                            if let Err(e) = audio::stop_recording(app.clone(), state) {
+                                log::warn!("tray: stop recording failed: {e}");
+                            }
+                        });
+                    }
+                    "tray-stop-dictation" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = dictation::stop_inner(&app).await {
+                                log::warn!("tray: stop dictation failed: {e}");
+                            }
+                        });
+                    }
+                    "tray-cancel-dictation" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let active = app
+                                .state::<dictation::DictationState>()
+                                .is_active
+                                .load(std::sync::atomic::Ordering::Acquire);
+                            if active {
+                                dictation::cancel_inner(&app);
+                            } else {
+                                dictation::force_hide_hud(&app);
+                            }
+                        });
+                    }
+                    "tray-manage-pipelines" => {
+                        show_main_window(app);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("tray-open-pipelines", ());
+                        }
+                    }
+                    "tray-settings" => {
+                        show_main_window(app);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("tray-open-settings", ());
                         }
                     }
                     "show" => {
@@ -1412,6 +1726,8 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .build(app)?;
+
+    update_tray_capture_display(&app_handle);
 
     Ok(())
 }

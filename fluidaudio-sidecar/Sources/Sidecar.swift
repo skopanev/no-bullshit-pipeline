@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import CoreML
 import FluidAudio
+import Darwin
 
 struct SpeakerSegment: Codable {
     let speakerId: String
@@ -559,6 +560,99 @@ struct ModelStatusJSON: Encodable {
     let variant: String
     let repo: String
     let cached: Bool
+    /// Written into the model directory before the atomic install. Because the
+    /// marker moves with the directory, Rust can recover the installed version
+    /// even if NBP exits immediately after the swap and before updating its
+    /// own version store.
+    let installed_sha: String?
+}
+
+private let modelRevisionMarker = ".nbp-model-revision"
+
+/// FluidAudio's shared ASR cache root (`.../FluidAudio/Models`). Staging lives
+/// directly beneath it so the final rename can never cross filesystems.
+func asrModelsRoot() -> URL {
+    AsrModels.defaultCacheDirectory(for: .v3).deletingLastPathComponent()
+}
+
+func modelRevision(at directory: URL) -> String? {
+    let marker = directory.appendingPathComponent(modelRevisionMarker)
+    guard let revision = try? String(contentsOf: marker, encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+        !revision.isEmpty
+    else { return nil }
+    return revision
+}
+
+func writeModelRevision(_ sha: String?, to directory: URL) throws {
+    guard let sha, !sha.isEmpty else { return }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let marker = directory.appendingPathComponent(modelRevisionMarker)
+    try sha.write(to: marker, atomically: true, encoding: .utf8)
+}
+
+/// Return a stable, resumable staging path for a repository. A stage is reused
+/// only when its marker matches the remote SHA Rust resolved for this update;
+/// otherwise it is discarded without touching the live model.
+func prepareModelStage(repo: Repo, targetSHA: String?) throws -> (root: URL, model: URL) {
+    let fm = FileManager.default
+    let root = asrModelsRoot().appendingPathComponent(".nbp-staging", isDirectory: true)
+    let model = root.appendingPathComponent(repo.folderName, isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+
+    if fm.fileExists(atPath: model.path) {
+        let reusable = targetSHA != nil && modelRevision(at: model) == targetSHA
+        if !reusable {
+            try fm.removeItem(at: model)
+        }
+    }
+
+    try fm.createDirectory(at: model, withIntermediateDirectories: true)
+    try writeModelRevision(targetSHA, to: model)
+    return (root, model)
+}
+
+/// Install a fully validated staged model. `RENAME_SWAP` is one atomic
+/// filesystem operation: readers see either the old complete directory or the
+/// new complete directory, never an empty/mixed cache. Once swapped, the old
+/// model sits at `staged` and is best-effort cleaned up.
+func atomicallyInstallModel(staged: URL, live: URL) throws {
+    let fm = FileManager.default
+    try fm.createDirectory(at: live.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+    if fm.fileExists(atPath: live.path) {
+        let result = staged.path.withCString { stagedPath in
+            live.path.withCString { livePath in
+                renameatx_np(AT_FDCWD, stagedPath, AT_FDCWD, livePath, UInt32(RENAME_SWAP))
+            }
+        }
+        guard result == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Atomic model swap failed: \(String(cString: strerror(errno)))"])
+        }
+
+        // Swap already succeeded; cleanup must not turn a successful install
+        // into a reported failure. If it fails, the old directory is harmless
+        // and its older marker makes the next update discard it.
+        do {
+            try fm.removeItem(at: staged)
+        } catch {
+            FileHandle.standardError.write(
+                Data("model update: old cache cleanup deferred: \(error.localizedDescription)\n".utf8))
+        }
+    } else {
+        let result = staged.path.withCString { stagedPath in
+            live.path.withCString { livePath in rename(stagedPath, livePath) }
+        }
+        guard result == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "Atomic model install failed: \(String(cString: strerror(errno)))"])
+        }
+    }
 }
 
 /// Emit the HF repo id for every managed on-device engine, sourced from
@@ -606,7 +700,20 @@ func runStatus(argv: [String]) async {
         cached = AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: .v3))
     }
 
-    let out = ModelStatusJSON(engine: engine, variant: variant, repo: repo, cached: cached)
+    let liveDirectory: URL
+    if engine == "qwen3" {
+        let v: Qwen3AsrVariant = (variant == "int8") ? .int8 : .f32
+        liveDirectory = Qwen3AsrModels.defaultCacheDirectory(variant: v)
+    } else {
+        liveDirectory = AsrModels.defaultCacheDirectory(for: .v3)
+    }
+    let installedSHA = cached ? modelRevision(at: liveDirectory) : nil
+    let out = ModelStatusJSON(
+        engine: engine,
+        variant: variant,
+        repo: repo,
+        cached: cached,
+        installed_sha: installedSHA)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     if let data = try? encoder.encode(out) {
@@ -616,10 +723,13 @@ func runStatus(argv: [String]) async {
     exit(0)
 }
 
-/// Download (or force-redownload) the active engine/variant via FluidAudio.
-/// `--force` removes the cached model dir first, so an update re-pulls main.
-/// Throttles progress emission to whole-percent changes — avoids flooding
-/// stderr / the IPC pipe with thousands of byte-level ticks on a multi-GB pull.
+/// Download or update the active engine/variant without mutating its live
+/// cache. `--force` means "fetch a fresh candidate"; it never deletes the
+/// installed model. The candidate is validated in staging and atomically
+/// swapped into place only after every component loads successfully.
+///
+/// Progress is throttled to whole-percent changes to avoid flooding stderr /
+/// the IPC pipe with byte-level ticks on a multi-GB pull.
 final class ProgressThrottle: @unchecked Sendable {
     private var last = ""
     private let lock = NSLock()
@@ -641,23 +751,27 @@ func runDownload(argv: [String]) async {
     var engine = "parakeet-v3"
     var variant = "f32"
     var force = false
+    var targetSHA: String? = nil
     var i = 1
     while i < argv.count {
         switch argv[i] {
         case "--engine": if i + 1 < argv.count { engine = argv[i + 1].lowercased(); i += 1 }
         case "--variant": if i + 1 < argv.count { variant = argv[i + 1].lowercased(); i += 1 }
         case "--force": force = true
+        case "--target-sha": if i + 1 < argv.count { targetSHA = argv[i + 1]; i += 1 }
         default: break
         }
         i += 1
     }
 
     do {
-        // Real progress from FluidAudio: fractionCompleted spans download +
-        // compile (0→1). Throttled to whole percents.
+        // DownloadUtils.downloadRepo reports its transport phase on 0→0.5
+        // (the remaining half is reserved for its higher-level compiler).
+        // We validate separately, so map that 0→0.5 range onto our first 85%.
+        // Validation and the atomic install have explicit final stages.
         let throttle = ProgressThrottle()
         let onProgress: DownloadUtils.ProgressHandler = { p in
-            let pct = Int(p.fractionCompleted * 100)
+            let pct = min(85, Int(p.fractionCompleted * 170))
             // Forward FluidAudio's real phase (label kept colon-free for the
             // `PROGRESS:stage:pct` line the Rust side parses).
             let stage: String
@@ -674,12 +788,78 @@ func runDownload(argv: [String]) async {
                 writeError("Qwen3-ASR requires macOS 15 or later")
             }
             let v: Qwen3AsrVariant = (variant == "int8") ? .int8 : .f32
-            _ = try await Qwen3AsrModels.download(variant: v, force: force, progressHandler: onProgress)
-        } else {
-            if force {
-                try? FileManager.default.removeItem(at: AsrModels.defaultCacheDirectory(for: .v3))
+            let live = Qwen3AsrModels.defaultCacheDirectory(variant: v)
+            if !force && Qwen3AsrModels.modelsExist(at: live) {
+                writeProgress("Complete", 100)
+                FileHandle.standardOutput.write(Data("{\"ok\":true}\n".utf8))
+                exit(0)
             }
-            _ = try await AsrModels.downloadAndLoad(version: .v3, progressHandler: onProgress)
+
+            var stage = try prepareModelStage(repo: v.repo, targetSHA: targetSHA)
+            // Keep transport failures resumable: DownloadUtils stores each
+            // completed file in place and only the current URLSession temp file
+            // is lost when the connection drops. Do not wrap this call in the
+            // validation retry below, or a transient network error would erase
+            // the useful staged files.
+            try await DownloadUtils.downloadRepo(v.repo, to: stage.root, progressHandler: onProgress)
+            guard Qwen3AsrModels.modelsExist(at: stage.model) else {
+                throw NSError(
+                    domain: "NBPModelUpdate",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Staged Qwen3 model is incomplete"])
+            }
+            do {
+                writeProgress("Verifying", 90)
+                _ = try await Qwen3AsrModels.load(from: stage.model)
+            } catch {
+                // Presence checks cannot detect a corrupt CoreML bundle. Retry
+                // once from an empty stage; the live model remains untouched.
+                try? FileManager.default.removeItem(at: stage.model)
+                stage = try prepareModelStage(repo: v.repo, targetSHA: targetSHA)
+                try await DownloadUtils.downloadRepo(v.repo, to: stage.root, progressHandler: onProgress)
+                guard Qwen3AsrModels.modelsExist(at: stage.model) else {
+                    throw NSError(
+                        domain: "NBPModelUpdate",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Staged Qwen3 model is incomplete"])
+                }
+                writeProgress("Verifying", 90)
+                _ = try await Qwen3AsrModels.load(from: stage.model)
+            }
+            // The downloader may have rebuilt the stage during validation, so
+            // stamp the revision again immediately before it moves to live.
+            try writeModelRevision(targetSHA, to: stage.model)
+            writeProgress("Installing", 97)
+            try atomicallyInstallModel(staged: stage.model, live: live)
+        } else {
+            let live = AsrModels.defaultCacheDirectory(for: .v3)
+            if !force && AsrModels.modelsExist(at: live) {
+                writeProgress("Complete", 100)
+                FileHandle.standardOutput.write(Data("{\"ok\":true}\n".utf8))
+                exit(0)
+            }
+
+            let stage = try prepareModelStage(repo: .parakeetV3, targetSHA: targetSHA)
+            // Use the transport-only API here instead of AsrModels.download.
+            // Its high-level loader deletes the whole cache after any first
+            // failure, including a temporary network interruption, which makes
+            // an otherwise resumable update restart from zero.
+            try await DownloadUtils.downloadRepo(
+                .parakeetV3,
+                to: stage.root,
+                variant: ParakeetEncoderPrecision.int8.rawValue,
+                progressHandler: onProgress)
+            guard AsrModels.modelsExist(at: stage.model) else {
+                throw NSError(
+                    domain: "NBPModelUpdate",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Staged Parakeet model is incomplete"])
+            }
+            writeProgress("Verifying", 90)
+            _ = try await AsrModels.load(from: stage.model, version: .v3)
+            try writeModelRevision(targetSHA, to: stage.model)
+            writeProgress("Installing", 97)
+            try atomicallyInstallModel(staged: stage.model, live: live)
         }
         writeProgress("Complete", 100)
         FileHandle.standardOutput.write(Data("{\"ok\":true}\n".utf8))
@@ -761,8 +941,8 @@ struct FluidAudioSidecar {
             return
         }
 
-        // Explicitly (re)download the active model. `--force` clears the cache
-        // first (for updates). FluidAudio owns the actual download.
+        // Explicitly download/update the active model. The update path stages
+        // and validates a candidate before atomically replacing the live cache.
         if CommandLine.arguments.contains("--download") {
             await runDownload(argv: CommandLine.arguments)
             return
@@ -850,15 +1030,15 @@ struct FluidAudioSidecar {
 
             writeProgress("Preparing models", 0)
 
-            if !cached { writeProgress("Downloading ASR model", 5) }
+            if !cached {
+                writeError(
+                    "Parakeet model is not downloaded. Open NBP Settings → Transcription and download it.")
+            }
             let tDownload = CFAbsoluteTimeGetCurrent()
-            // When all required v3 files are present, skip FluidAudio's network probe.
-            // `downloadAndLoad` is all-or-nothing — one missing file re-downloads the
-            // whole 2.8 GB repo even if the rest is cached.
-            let asrModels = cached
-                ? try await AsrModels.loadFromCache(version: .v3)
-                : try await AsrModels.downloadAndLoad(version: .v3)
-            tick("asrModels.downloadAndLoad", tDownload)
+            // Inference never downloads implicitly. All model mutations go
+            // through runDownload's staging + validation + atomic install.
+            let asrModels = try await AsrModels.loadFromCache(version: .v3)
+            tick("asrModels.loadFromCache", tDownload)
 
             let tInit = CFAbsoluteTimeGetCurrent()
             let asrManager = AsrManager(config: .default)
@@ -1074,7 +1254,11 @@ struct FluidAudioSidecar {
         do {
             writeProgress("Preparing Qwen3 model", 0)
             let manager = Qwen3AsrManager()
-            let cacheDir = try await Qwen3AsrModels.download(variant: variant)
+            let cacheDir = Qwen3AsrModels.defaultCacheDirectory(variant: variant)
+            guard Qwen3AsrModels.modelsExist(at: cacheDir) else {
+                writeError(
+                    "Qwen3 model is not downloaded. Open NBP Settings → Transcription and download it.")
+            }
             writeProgress("Loading Qwen3 model", 20)
             try await manager.loadModels(from: cacheDir)
 

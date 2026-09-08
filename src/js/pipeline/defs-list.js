@@ -81,7 +81,7 @@ export function renderPipelineDefsList() {
       if (!p) return;
       const updated = { ...p, auto_run: input.checked };
       try {
-        await invoke('save_pipeline', { pipeline: updated });
+        await invoke('save_pipeline', { pipeline: updated, previousName: name });
         showToast('Pipeline saved', 'success');
         await loadPipelineDefs();
       } catch (err) {

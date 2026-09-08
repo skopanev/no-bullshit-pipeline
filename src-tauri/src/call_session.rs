@@ -214,9 +214,8 @@ fn handle_started(app: &tauri::AppHandle, call_app: Option<String>, bundle_id: O
     });
 }
 
-/// Worker: calls `audio::start_recording`, tags + assigns default pipeline,
-/// then commits to Recording { id } or rolls back if Ignore/ended fired
-/// during the start.
+/// Worker: calls `audio::start_recording`, then commits to Recording { id } or
+/// rolls back if Ignore/ended fired during the start.
 fn run_start(
     app: tauri::AppHandle,
     session_id: String,
@@ -233,11 +232,7 @@ fn run_start(
 
             // No tags, no default-pipeline auto-attach. Pipelines stay manual
             // (user picks via chip bar on the recording). Transcription is
-            // triggered automatically from handle_ended — see below. Tags
-            // were avoided because `migrate_tags_to_pipeline_labels` in
-            // storage.rs auto-converts every tag into a zero-step pipeline,
-            // which would pollute the pipelines dropdown with junk like
-            // "auto-detected" / "zoom".
+            // triggered automatically from handle_ended — see below.
 
             // Replace the empty title `audio::start_recording` creates with
             // something readable: "Zoom · 19 May 14:23". Falls back to "Call"
@@ -245,7 +240,7 @@ fn run_start(
             let app_label = call_app.as_deref().unwrap_or("Call");
             let title = format!("{} · {}", app_label, chrono::Local::now().format("%H:%M"));
             if let Ok(mut meta) = crate::storage::read_metadata(&recording_id) {
-                meta.title = title;
+                meta.title = title.clone();
                 meta.app_bundle_id = bundle_id.clone();
                 meta.app_friendly_name = call_app.clone();
                 meta.source = "call".to_string();
@@ -257,6 +252,7 @@ fn run_start(
                     );
                 }
             }
+            crate::capture_coordinator::set_recording_label(&app, &recording_id, title);
 
             // Notify the frontend the recording exists so the main-window
             // list refreshes during the call (instead of only after the
