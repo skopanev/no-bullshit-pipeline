@@ -1302,12 +1302,8 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
                 MenuItemBuilder::with_id("tray-dictation-detail", dictation_detail(&context))
                     .enabled(false)
                     .build(app)?;
-            let stop_label = if context.auto_paste {
-                "Stop && Paste"
-            } else {
-                "Stop && Copy"
-            };
-            let stop = MenuItemBuilder::with_id("tray-stop-dictation", stop_label).build(app)?;
+            let stop =
+                MenuItemBuilder::with_id("tray-stop-dictation", "Stop Dictation").build(app)?;
             let cancel =
                 MenuItemBuilder::with_id("tray-cancel-dictation", "Cancel Dictation").build(app)?;
             MenuBuilder::new(app)
