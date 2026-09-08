@@ -1231,7 +1231,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
                 .enabled(false)
                 .build(app)?;
             let stop_item =
-                MenuItemBuilder::with_id("tray-stop-recording", "Stop & Save Recording")
+                MenuItemBuilder::with_id("tray-stop-recording", "Stop && Save Recording")
                     .build(app)?;
             let open_recording_item = MenuItemBuilder::with_id(
                 format!("tray-open-recording:{id}"),
@@ -1303,9 +1303,9 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
                     .enabled(false)
                     .build(app)?;
             let stop_label = if context.auto_paste {
-                "Stop & Paste"
+                "Stop && Paste"
             } else {
-                "Stop & Copy"
+                "Stop && Copy"
             };
             let stop = MenuItemBuilder::with_id("tray-stop-dictation", stop_label).build(app)?;
             let cancel =
