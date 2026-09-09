@@ -3,6 +3,7 @@
 import { invoke } from '../core/tauri.js';
 import * as state from '../core/state.js';
 import { escapeHtml } from '../core/utils.js';
+import { emit } from '../core/events.js';
 import { showToast } from '../ui/toast.js';
 import { ViewManager } from '../ui/view-manager.js';
 import * as pipelineState from './state.js';
@@ -109,13 +110,9 @@ async function handleChipClick(pipelineName) {
     if (chipBar) chipBar.style.display = 'none';
 
     if (state.selectedRecordingId) {
-      const pipelineCardsEl = document.getElementById('pipeline-cards');
-      if (pipelineCardsEl) {
-        const card = pipelineCardsEl.querySelector(`.pipeline-card[data-pipeline="${pipelineName}"]`);
-        if (card) card.style.display = 'none';
-      }
       renderPipelineChips();
       renderPipelineStatus(state.selectedRecordingId);
+      emit('recording:artifactsChanged', state.selectedRecordingId);
     }
   } else {
     await startRecordingWithPipeline(pipelineName);

@@ -1,40 +1,8 @@
 use lewton::inside_ogg::OggStreamReader;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::path::Path;
 
 const WAVEFORM_SAMPLES: usize = 1000;
-
-/// Audio file metadata from actual OGG file
-#[derive(Clone, Debug)]
-pub struct OggFileInfo {
-    pub duration_sec: f64,
-}
-
-/// Get actual audio info from OGG file (duration calculated from sample count)
-pub fn get_ogg_file_info(path: &Path) -> Result<OggFileInfo, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open audio: {}", e))?;
-    let mut ogg_reader =
-        OggStreamReader::new(file).map_err(|e| format!("Failed to parse OGG: {}", e))?;
-
-    let sample_rate = ogg_reader.ident_hdr.audio_sample_rate;
-
-    // Count total samples by decoding
-    let mut total_frames: u64 = 0;
-
-    while let Some(packet) = ogg_reader
-        .read_dec_packet_generic::<Vec<Vec<i16>>>()
-        .map_err(|e| format!("Decode error: {}", e))?
-    {
-        if !packet.is_empty() {
-            total_frames += packet[0].len() as u64;
-        }
-    }
-
-    let duration_sec = total_frames as f64 / sample_rate as f64;
-
-    Ok(OggFileInfo { duration_sec })
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WaveformData {

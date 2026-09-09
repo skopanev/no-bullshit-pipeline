@@ -45,7 +45,9 @@ export async function subscribeToProgress(recordingId) {
     } else {
       delete pipelineRunningSteps[key];
     }
-    renderPipelineStatus(recordingId);
+    const section = document.getElementById('pipeline-status-section');
+    if (section?.dataset.userVisible === 'true') renderPipelineStatus(recordingId);
+    emit('recording:artifactsChanged', payload);
   });
 
   if (pipelineProgressGeneration !== generation) {
@@ -63,10 +65,17 @@ export async function renderPipelineStatus(recordingId) {
   try {
     const states = await invoke('get_all_pipeline_states', { recordingId });
     if (!states || states.length === 0) {
+      section.dataset.hasData = 'false';
       section.style.display = 'none';
       return;
     }
-    section.style.display = '';
+    section.dataset.hasData = 'true';
+    const isVisible = section.dataset.userVisible === 'true';
+    section.style.display = isVisible ? '' : 'none';
+    if (!isVisible) {
+      content.innerHTML = '';
+      return;
+    }
 
     let html = '';
     for (const st of states) {
@@ -105,6 +114,7 @@ export async function renderPipelineStatus(recordingId) {
     wireStatusInteractions(content, recordingId);
   } catch (e) {
     console.error('Failed to load pipeline states:', e);
+    section.dataset.hasData = 'false';
     section.style.display = 'none';
   }
 }
@@ -260,22 +270,6 @@ function wireStatusInteractions(content, recordingId) {
         if (pipelineName && state.currentAssignedPipelines.has(pipelineName)) {
           state.currentAssignedPipelines.delete(pipelineName);
           emit('pipelines:renderChips');
-          const pipelineCardsEl = document.getElementById('pipeline-cards');
-          if (pipelineCardsEl) {
-            const card = pipelineCardsEl.querySelector(`.pipeline-card[data-pipeline="${pipelineName}"]`);
-            if (card) {
-              card.style.display = '';
-              card.style.maxWidth = '';
-              card.style.minWidth = '';
-              card.style.padding = '';
-              card.style.borderWidth = '';
-              card.style.margin = '';
-              card.style.opacity = '';
-              card.style.overflow = '';
-              card.style.pointerEvents = '';
-              card.style.transition = '';
-            }
-          }
         }
       } catch (err) {
         console.error('Failed to delete pipeline run:', err);
@@ -284,6 +278,7 @@ function wireStatusInteractions(content, recordingId) {
       await loadRecordings();
       if (state.selectedRecordingId === recordingId) {
         renderPipelineStatus(recordingId);
+        emit('recording:artifactsChanged', recordingId);
       }
     });
   });

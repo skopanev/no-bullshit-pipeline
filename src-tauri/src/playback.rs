@@ -62,11 +62,20 @@ pub fn play_audio(recording_id: String) -> Result<(), String> {
         return Err("Audio file not found".to_string());
     }
 
-    // Get duration
-    let duration_ms = match crate::waveform::get_ogg_file_info(&audio_path) {
-        Ok(info) => (info.duration_sec * 1000.0) as u64,
-        Err(_) => 0,
-    };
+    // Duration is already persisted when recording finalizes. Reading the
+    // small metadata file is effectively instant; scanning the full OGG here
+    // made the Play button block for the length of large recordings.
+    let duration_ms = crate::storage::read_metadata(&recording_id)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .audio
+                .mix
+                .or(metadata.audio.mic)
+                .or(metadata.audio.system)
+        })
+        .map(|audio| (audio.duration_sec * 1000.0) as u64)
+        .unwrap_or(0);
 
     DURATION_MS.store(duration_ms, Ordering::SeqCst);
     CURRENT_POSITION_MS.store(0, Ordering::SeqCst);
@@ -137,7 +146,11 @@ fn run_playback(audio_path: std::path::PathBuf) -> Result<(), String> {
             accumulated_ms += delta;
         }
 
-        let position = accumulated_ms.min(duration_ms);
+        let position = if duration_ms > 0 {
+            accumulated_ms.min(duration_ms)
+        } else {
+            accumulated_ms
+        };
         CURRENT_POSITION_MS.store(position, Ordering::Relaxed);
 
         // Sleep shorter but in a loop to respond quickly to STOP_SIGNAL

@@ -20,7 +20,9 @@ const AUDIT_ELEMENTS = [
   { id: 'back-btn',                  desc: 'Back button in detail view' },
   { id: 'detail-title',              desc: 'Recording title input' },
   { id: 'process-btn',               desc: 'Transcribe button' },
-  { id: 'pipeline-cards',            desc: 'Pipeline cards container' },
+  { id: 'artifact-tabs',             desc: 'Recording artifact tabs' },
+  { id: 'copy-transcript-btn-header', desc: 'Copy artifact button' },
+  { id: 'run-action-btn',            desc: 'Run action button' },
   { id: 'delete-modal',              desc: 'Delete confirmation modal' },
   { id: 'onboarding-overlay',        desc: 'Onboarding overlay' },
 ];

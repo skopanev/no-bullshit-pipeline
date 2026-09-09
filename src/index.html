@@ -89,25 +89,34 @@
       <section id="detail-view" class="detail-view">
         <div class="detail-top-nav-simple">
           <button class="back-link-btn" id="back-btn">
-            <span class="icon">←</span> Back
+            <span class="icon">←</span> Library
           </button>
           <div class="detail-top-actions">
-            <span id="detail-meta-header" class="detail-meta-text"></span>
-            <button id="open-folder-btn-header" class="mini-action-btn" title="Open Folder">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="11" cy="11" r="8"></circle>
-                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-              </svg>
-            </button>
-            <button id="copy-transcript-btn-header" class="mini-action-btn" title="Copy transcript">
+            <div class="detail-menu-wrap">
+              <button id="run-action-btn" class="detail-secondary-action" type="button" aria-haspopup="menu" aria-expanded="false">
+                Run action
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+              </button>
+              <div id="run-action-menu" class="detail-popover" role="menu" style="display:none;"></div>
+            </div>
+            <button id="copy-transcript-btn-header" class="detail-primary-action" type="button" title="Copy transcript" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
               </svg>
+              <span id="copy-artifact-label">Copy transcript</span>
             </button>
-            <button id="delete-btn-header" class="mini-action-btn danger" title="Delete">
-              <span class="icon-trash"></span>
-            </button>
+            <div class="detail-menu-wrap">
+              <button id="detail-more-btn" class="detail-icon-action" type="button" title="More actions" aria-haspopup="menu" aria-expanded="false">•••</button>
+              <div id="detail-more-menu" class="detail-popover detail-popover--right" role="menu" style="display:none;">
+                <button id="retranscribe-btn" class="detail-menu-item" type="button" role="menuitem">Re-transcribe</button>
+                <button id="rediariarize-btn" class="detail-menu-item" type="button" role="menuitem">Re-identify speakers</button>
+                <button id="show-processing-details-btn" class="detail-menu-item" type="button" role="menuitem">Processing details</button>
+                <button id="open-folder-btn-header" class="detail-menu-item" type="button" role="menuitem">Reveal source files</button>
+                <div class="detail-menu-separator"></div>
+                <button id="delete-btn-header" class="detail-menu-item detail-menu-item--danger" type="button" role="menuitem">Delete recording</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -120,6 +129,7 @@
                 placeholder="Untitled Recording"
               />
 
+              <div id="detail-meta-header" class="detail-meta-text"></div>
               <div id="detail-calendar-row" class="detail-calendar-row" style="display: none;"></div>
 
               <div id="live-transcript-panel" class="live-transcript-panel" style="display: none;">
@@ -131,101 +141,44 @@
               </div>
             </div>
 
-            <div class="detail-content-grid" id="detail-content-grid">
-              <div class="content-block" id="detail-pipeline-assignment" style="display: none;">
-                <div class="block-header">
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="block-icon">
-                    <polyline points="16 18 22 12 16 6"></polyline>
-                    <polyline points="8 6 2 12 8 18"></polyline>
-                  </svg>
-                  <h3>AVAILABLE PIPELINES</h3>
-                  <span class="rpp-hint">Click to queue for this recording</span>
+            <nav id="artifact-tabs" class="artifact-tabs" role="tablist" aria-label="Recording content">
+              <button class="artifact-tab active" type="button" role="tab" aria-selected="true" data-artifact="transcript">Transcript</button>
+            </nav>
+
+            <section class="recording-workspace">
+              <div id="detail-audio-player" class="detail-audio-player" style="display:none;">
+                <button id="detail-play-btn" class="detail-play-btn" type="button" title="Play recording" aria-label="Play recording">
+                  <svg class="detail-play-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>
+                  <svg class="detail-pause-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="display:none;"><path d="M6 5h4v14H6zm8 0h4v14h-4z"></path></svg>
+                </button>
+                <span id="detail-audio-current" class="detail-audio-time">00:00</span>
+                <div class="detail-playback-track" aria-hidden="true">
+                  <div id="detail-playback-progress" class="detail-playback-progress"></div>
                 </div>
-                <div id="pipeline-cards" class="recording-pipeline-cards"></div>
+                <span id="detail-audio-duration" class="detail-audio-time">00:00</span>
               </div>
 
-              <div class="content-block" id="transcript-section">
-                <div class="block-header">
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    class="block-icon"
-                  >
-                    <path
-                      d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
-                    ></path>
-                  </svg>
-                  <h3>Transcript</h3>
-                  <button
-                    id="process-btn"
-                    class="mini-action-btn"
-                    title="Transcribe"
-                    style="margin-left: auto; height: 28px; padding: 0 12px"
-                  >
-                    <span style="font-weight: 600; font-size: 12px"
-                      >Transcribe</span
-                    >
-                  </button>
-                  <button
-                    id="save-transcript-btn"
-                    class="mini-action-btn"
-                    title="Save transcript as .md"
-                    style="height: 28px; padding: 0 12px; display: none"
-                  >
-                    <span style="font-weight: 600; font-size: 12px"
-                      >Save</span
-                    >
-                  </button>
-                  <button
-                    id="transcript-raw-toggle"
-                    class="mini-action-btn"
-                    title="Toggle raw / formatted"
-                    style="height: 28px; padding: 0 12px; display: none"
-                  >
-                    <span style="font-weight: 600; font-size: 12px">Raw</span>
-                  </button>
-                </div>
-                <div id="transcript-content" class="content-body empty">
-                  Not processed yet.
-                </div>
+              <div id="speaker-inline-status" class="speaker-inline-status" style="display:none;"></div>
+
+              <div id="transcript-section" class="artifact-panel">
+                <button id="process-btn" type="button" style="display:none;">Transcribe</button>
+                <div id="transcript-content" class="artifact-content empty">Not processed yet.</div>
               </div>
 
-            </div>
+              <div id="result-section" class="artifact-panel" style="display:none;">
+                <div id="result-content" class="artifact-content"></div>
+              </div>
+            </section>
 
-            <div class="content-block" id="diarization-section">
+            <section class="processing-details" id="pipeline-status-section" data-user-visible="false" style="display: none;">
               <div class="block-header">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="block-icon">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                  <circle cx="9" cy="7" r="4"></circle>
-                  <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-                </svg>
-                <h3>Speakers</h3>
-                <button id="diarize-btn" class="mini-action-btn" type="button" title="Detect who spoke" style="margin-left:auto;">Diarize</button>
-              </div>
-              <div id="diarization-content" class="content-body empty">
-                Not diarized yet.
-              </div>
-            </div>
-
-            <div class="content-block" id="pipeline-status-section" style="display: none;">
-              <div class="block-header">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="block-icon">
-                  <polyline points="16 18 22 12 16 6"></polyline>
-                  <polyline points="8 6 2 12 8 18"></polyline>
-                </svg>
-                <h3>Your Runs</h3>
+                <h3>Processing details</h3>
+                <button id="hide-processing-details-btn" class="detail-icon-action" type="button" title="Hide processing details">×</button>
               </div>
               <div id="pipeline-status-content" class="content-body">
                 <!-- Status rows rendered by JS -->
               </div>
-            </div>
+            </section>
 
           </div>
         </div>

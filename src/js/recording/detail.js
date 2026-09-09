@@ -2,15 +2,15 @@ import { invoke, listen } from '../core/tauri.js';
 import * as state from '../core/state.js';
 import { setSelectedRecordingId } from '../core/state.js';
 import { formatDuration, getDuration, escapeHtml } from '../core/utils.js';
-import { looksLikeMarkdown, applyMarkdownRendering } from '../ui/markdown.js';
+import { applyMarkdownRendering } from '../ui/markdown.js';
 import { showToast } from '../ui/toast.js';
 import { showConfirm } from '../ui/confirm-modal.js';
 import { ViewManager } from '../ui/view-manager.js';
+import { on } from '../core/events.js';
 import { updateMainButton } from './controls.js';
 import { loadRecordings } from './list.js';
 import { subscribeToProgress, renderPipelineStatus, cleanupPipelineProgress } from './pipeline-status.js';
 import { commitSpeakerName, ensureNamesDatalist } from '../settings/people.js';
-import { renderPipelineFlowHTML } from '../pipeline/flow-renderer.js';
 import * as pipelineState from '../pipeline/state.js';
 
 const dateOptions = {
@@ -29,6 +29,21 @@ let transcriptionCurrentStage = '';
 // Processing-poll state (single active poller per detail view)
 let processingPollIntervalId = null;
 let processingPollGeneration = 0;
+
+// Artifact workspace state. The raw transcript is always the primary source;
+// speaker view and pipeline results are optional sibling artifacts.
+let detailRecordingId = null;
+let activeArtifact = 'transcript';
+let transcriptCopyText = '';
+let speakerArtifact = null;
+let pipelineArtifacts = [];
+let artifactRefreshGeneration = 0;
+
+// Compact detail-player state.
+let playbackPollInterval = null;
+let detailAudioDurationMs = 0;
+let detailPlaybackRecordingId = null;
+let detailPlaybackOwnsAudio = false;
 
 function stopProcessingPoll() {
   processingPollGeneration++;
@@ -49,7 +64,11 @@ export function clearTranscriptionTimer() {
 
 export function hideDetailView() {
   setSelectedRecordingId(null);
+  detailRecordingId = null;
+  artifactRefreshGeneration++;
   stopProcessingPoll();
+  stopDetailPlayback();
+  closeDetailMenus();
   updateMainButton();
   ViewManager.showRecordings();
   cleanupPipelineProgress();
@@ -112,16 +131,16 @@ async function calendarAction(cmd, id, btn) {
   }
 }
 
-// --- Diarization (who said what) ---------------------------------------------
+// --- Diarization (secondary speaker view) -----------------------------------
 
-function renderDiarProgress(content, stage, percent) {
-  content.className = 'content-body';
-  content.innerHTML = `
-    <div class="diar-progress-row">
-      <span class="diar-progress-stage">${escapeHtml(stage || 'Working')}</span>
-      <span class="diar-progress-pct">${percent || 0}%</span>
-    </div>
-    <div class="diar-progress"><div class="diar-progress-fill" style="width:${Math.min(100, percent || 0)}%"></div></div>`;
+function renderDiarProgress(stage, percent) {
+  const statusEl = document.getElementById('speaker-inline-status');
+  if (!statusEl) return;
+  statusEl.style.display = '';
+  statusEl.innerHTML = `
+    <span>Identifying speakers · ${escapeHtml(stage || 'Working')}</span>
+    <div class="diar-progress"><div class="diar-progress-fill" style="width:${Math.min(100, percent || 0)}%"></div></div>
+    <span class="diar-progress-pct">${percent || 0}%</span>`;
 }
 
 let diarListenerStarted = false;
@@ -134,10 +153,7 @@ function ensureDiarListener() {
     const p = event.payload || {};
     if (p.recording_id !== state.selectedRecordingId) return;
     if (p.status === 'running') {
-      const content = document.getElementById('diarization-content');
-      const btn = document.getElementById('diarize-btn');
-      if (btn) { btn.disabled = true; btn.textContent = 'Diarizing…'; }
-      if (content) renderDiarProgress(content, p.stage, p.percent);
+      renderDiarProgress(p.stage, p.percent);
     } else {
       const rec = state.allRecordings.find(r => r.id === p.recording_id);
       if (rec) renderDiarization(rec);
@@ -183,9 +199,7 @@ function startSpeakerRename(el, rec, spk, current) {
 
 async function renderDiarization(rec) {
   ensureDiarListener();
-  const content = document.getElementById('diarization-content');
-  const btn = document.getElementById('diarize-btn');
-  if (!content) return;
+  const statusEl = document.getElementById('speaker-inline-status');
 
   let status = null;
   let diar = null;
@@ -207,34 +221,23 @@ async function renderDiarization(rec) {
 
   const running = !!(status && status.status === 'running');
 
-  if (btn) {
-    btn.disabled = running || rec.status === 'processing';
-    btn.textContent = running ? 'Diarizing…' : (diar ? 'Re-diarize' : 'Diarize');
-    btn.onclick = async () => {
-      btn.disabled = true;
-      btn.textContent = 'Diarizing…';
-      content.className = 'content-body empty';
-      content.textContent = 'Starting…';
-      try {
-        await invoke('diarize_recording', { recordingId: rec.id });
-      } catch (e) {
-        showToast('Diarization failed: ' + e, 'error');
-      }
-      renderDiarization(rec);
-    };
-  }
-
   if (running) {
-    renderDiarProgress(content, status.stage, status.percent);
-    return;
+    renderDiarProgress(status.stage, status.percent);
+  } else if (statusEl) {
+    statusEl.style.display = 'none';
+    statusEl.innerHTML = '';
   }
 
   if (!diar || !diar.segments || diar.segments.length === 0) {
-    content.className = 'content-body empty';
-    content.textContent =
-      status && status.status === 'failed' && status.error
-        ? `Diarization failed: ${status.error}`
-        : 'Not diarized yet.';
+    speakerArtifact = null;
+    if (!running && status && status.status === 'failed' && status.error && statusEl) {
+      statusEl.style.display = '';
+      statusEl.innerHTML = `
+        <span>Speakers could not be identified: ${escapeHtml(status.error)}</span>
+        <button class="speaker-retry-btn" type="button">Retry</button>`;
+      statusEl.querySelector('.speaker-retry-btn')?.addEventListener('click', () => startDiarization(rec));
+    }
+    renderArtifactTabs();
     return;
   }
 
@@ -304,44 +307,417 @@ async function renderDiarization(rec) {
     .join('');
 
   if (!rows) {
-    content.className = 'content-body empty';
-    content.textContent = `${diar.speaker_count} speaker(s) detected, but no speech segments with text.`;
+    speakerArtifact = null;
+    renderArtifactTabs();
     return;
   }
 
-  content.className = 'content-body';
-  content.innerHTML = rows;
+  const copyText = groups
+    .map(g => `${label(g.speaker)}:\n${g.paras.map(p => p.text).join('\n\n')}`)
+    .join('\n\n');
 
-  content.querySelectorAll('.diar-spk').forEach(el => {
-    el.addEventListener('click', () => {
-      const spk = parseInt(el.dataset.spk, 10);
-      startSpeakerRename(el, rec, spk, (ident[spk] && ident[spk].name) || '');
+  speakerArtifact = {
+    key: 'speakers',
+    label: 'Speakers',
+    html: rows,
+    copyText,
+    wire(container) {
+      container.querySelectorAll('.diar-spk').forEach(el => {
+        el.addEventListener('click', () => {
+          const spk = parseInt(el.dataset.spk, 10);
+          startSpeakerRename(el, rec, spk, (ident[spk] && ident[spk].name) || '');
+        });
+      });
+    },
+  };
+  renderArtifactTabs();
+}
+
+async function startDiarization(rec) {
+  if (!rec || rec.status === 'processing') return;
+  renderDiarProgress('Starting', 0);
+  try {
+    await invoke('diarize_recording', { recordingId: rec.id });
+  } catch (e) {
+    showToast('Speaker identification failed: ' + e, 'error');
+  }
+  if (state.selectedRecordingId === rec.id) renderDiarization(rec);
+}
+
+function artifactKeyForPipeline(name) {
+  return `pipeline:${name}`;
+}
+
+function setCopyAction(text, label = 'Copy transcript') {
+  const btn = document.getElementById('copy-transcript-btn-header');
+  const labelEl = document.getElementById('copy-artifact-label');
+  if (!btn || !labelEl) return;
+  btn.disabled = !text;
+  btn.dataset.copyText = text || '';
+  btn.dataset.defaultLabel = label;
+  labelEl.textContent = label;
+  btn.title = label;
+}
+
+function renderActiveArtifact() {
+  const transcriptSection = document.getElementById('transcript-section');
+  const resultSection = document.getElementById('result-section');
+  const resultContent = document.getElementById('result-content');
+  if (!transcriptSection || !resultSection || !resultContent) return;
+
+  if (activeArtifact === 'transcript') {
+    transcriptSection.style.display = '';
+    resultSection.style.display = 'none';
+    setCopyAction(transcriptCopyText, 'Copy transcript');
+    return;
+  }
+
+  transcriptSection.style.display = 'none';
+  resultSection.style.display = '';
+  resultContent.className = 'artifact-content';
+
+  if (activeArtifact === 'speakers' && speakerArtifact) {
+    resultContent.innerHTML = speakerArtifact.html;
+    speakerArtifact.wire(resultContent);
+    setCopyAction(speakerArtifact.copyText, 'Copy speaker view');
+    return;
+  }
+
+  const artifact = pipelineArtifacts.find(item => item.key === activeArtifact);
+  if (!artifact) {
+    activeArtifact = 'transcript';
+    renderArtifactTabs();
+    return;
+  }
+
+  if (artifact.status === 'running' || artifact.status === 'waiting') {
+    resultContent.className = 'artifact-content empty';
+    resultContent.innerHTML = `
+      <div class="artifact-result-state">
+        <span class="btn-spinner"></span>
+        <span>${artifact.status === 'waiting' ? 'Waiting to run' : 'Creating result…'}</span>
+      </div>`;
+    setCopyAction('', 'Copy result');
+  } else if (!artifact.loaded) {
+    resultContent.className = 'artifact-content empty';
+    resultContent.innerHTML = `
+      <div class="artifact-result-state">
+        <span class="btn-spinner"></span>
+        <span>Loading result…</span>
+      </div>`;
+    setCopyAction('', 'Copy result');
+    loadPipelineArtifact(detailRecordingId, artifact);
+  } else if (artifact.output) {
+    applyMarkdownRendering(resultContent, artifact.output);
+    setCopyAction(artifact.output, 'Copy result');
+  } else {
+    resultContent.className = 'artifact-content empty';
+    resultContent.innerHTML = `
+      <div class="artifact-result-state">
+        <strong>This result could not be created.</strong>
+        ${artifact.error ? `<span>${escapeHtml(artifact.error)}</span>` : ''}
+        <button class="detail-secondary-action artifact-retry-action" type="button">Run again</button>
+      </div>`;
+    resultContent.querySelector('.artifact-retry-action')?.addEventListener('click', () => {
+      const rec = state.allRecordings.find(r => r.id === state.selectedRecordingId);
+      if (rec) runAction(rec, artifact.label);
+    });
+    setCopyAction('', 'Copy result');
+  }
+}
+
+function renderArtifactTabs() {
+  const tabs = document.getElementById('artifact-tabs');
+  if (!tabs) return;
+
+  const availableKeys = new Set(['transcript']);
+  let html = '<button class="artifact-tab" type="button" role="tab" data-artifact="transcript">Transcript</button>';
+  if (speakerArtifact) {
+    availableKeys.add('speakers');
+    html += '<button class="artifact-tab" type="button" role="tab" data-artifact="speakers">Speakers</button>';
+  }
+  for (const artifact of pipelineArtifacts) {
+    availableKeys.add(artifact.key);
+    const stateClass = artifact.status === 'running' || artifact.status === 'waiting'
+      ? 'running'
+      : artifact.status === 'partial' ? 'failed' : '';
+    const statusDot = stateClass ? `<span class="artifact-tab-status ${stateClass}"></span>` : '';
+    html += `<button class="artifact-tab" type="button" role="tab" data-artifact="${escapeHtml(artifact.key)}">${escapeHtml(artifact.label)}${statusDot}</button>`;
+  }
+
+  if (!availableKeys.has(activeArtifact)) activeArtifact = 'transcript';
+  tabs.innerHTML = html;
+  tabs.querySelectorAll('.artifact-tab').forEach(tab => {
+    const isActive = tab.dataset.artifact === activeArtifact;
+    tab.classList.toggle('active', isActive);
+    tab.setAttribute('aria-selected', String(isActive));
+    tab.addEventListener('click', () => {
+      activeArtifact = tab.dataset.artifact;
+      renderArtifactTabs();
     });
   });
+  renderActiveArtifact();
+}
+
+function syncPipelineArtifacts(states) {
+  const latestByName = new Map();
+  for (const pipelineRun of states || []) {
+    const previous = latestByName.get(pipelineRun.name);
+    if (!previous || (pipelineRun.run_index || 0) >= (previous.run_index || 0)) {
+      latestByName.set(pipelineRun.name, pipelineRun);
+    }
+  }
+
+  pipelineArtifacts = [...latestByName.values()].map(pipelineRun => {
+    const runIndex = pipelineRun.run_index || 0;
+    const existing = pipelineArtifacts.find(item =>
+      item.label === pipelineRun.name && item.runIndex === runIndex
+    );
+    return {
+      key: artifactKeyForPipeline(pipelineRun.name),
+      label: pipelineRun.name,
+      runIndex,
+      status: String(pipelineRun.status || 'waiting').toLowerCase(),
+      output: existing?.output || '',
+      error: pipelineRun.error || existing?.error || '',
+      loaded: existing?.loaded || false,
+      loading: existing?.loading || false,
+    };
+  });
+
+  const detailsBtn = document.getElementById('show-processing-details-btn');
+  if (detailsBtn) detailsBtn.style.display = pipelineArtifacts.length > 0 ? '' : 'none';
+  renderArtifactTabs();
+}
+
+async function loadPipelineArtifact(recordingId, artifact) {
+  if (!recordingId || !artifact || artifact.loaded || artifact.loading) return;
+  artifact.loading = true;
+  try {
+    const steps = await invoke('get_step_outputs', {
+      recordingId,
+      pipelineName: artifact.label,
+      runIndex: artifact.runIndex,
+    }) || [];
+    const current = pipelineArtifacts.find(item =>
+      item.key === artifact.key && item.runIndex === artifact.runIndex
+    );
+    if (!current || state.selectedRecordingId !== recordingId) return;
+    const finalWithOutput = [...steps].reverse().find(step => step.output);
+    const failedStep = steps.find(step => step.status === 'failed');
+    current.output = finalWithOutput?.output || '';
+    current.error = failedStep?.error || current.error;
+    current.loaded = true;
+    current.loading = false;
+  } catch (error) {
+    const current = pipelineArtifacts.find(item =>
+      item.key === artifact.key && item.runIndex === artifact.runIndex
+    );
+    if (current) {
+      current.error = String(error);
+      current.loaded = true;
+      current.loading = false;
+    }
+  }
+  if (state.selectedRecordingId === recordingId && activeArtifact === artifact.key) {
+    renderActiveArtifact();
+  }
+}
+
+async function refreshPipelineArtifacts(recordingId) {
+  const generation = ++artifactRefreshGeneration;
+  try {
+    const states = await invoke('get_all_pipeline_states', { recordingId }) || [];
+    if (generation !== artifactRefreshGeneration || state.selectedRecordingId !== recordingId) return;
+    syncPipelineArtifacts(states);
+  } catch (error) {
+    console.error('Failed to load recording results:', error);
+  }
+}
+
+function closeDetailMenus() {
+  for (const [buttonId, menuId] of [
+    ['run-action-btn', 'run-action-menu'],
+    ['detail-more-btn', 'detail-more-menu'],
+  ]) {
+    const button = document.getElementById(buttonId);
+    const menu = document.getElementById(menuId);
+    if (menu) menu.style.display = 'none';
+    if (button) button.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function openDetailMenu(button, menu) {
+  const willOpen = menu.style.display === 'none';
+  closeDetailMenus();
+  if (willOpen) {
+    menu.style.display = '';
+    button.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function populateActionMenu(rec, hasTranscript) {
+  const button = document.getElementById('run-action-btn');
+  const menu = document.getElementById('run-action-menu');
+  if (!button || !menu) return;
+
+  const actions = pipelineState.allPipelineDefs || [];
+  button.disabled = !hasTranscript || rec.status === 'processing';
+  button.title = !hasTranscript ? 'A transcript is needed before running an action' : 'Create another result';
+
+  if (actions.length === 0) {
+    menu.innerHTML = `
+      <div class="detail-menu-empty">No actions configured yet.</div>
+      <button class="detail-menu-item js-manage-actions" type="button" role="menuitem">Manage actions…</button>`;
+  } else {
+    menu.innerHTML = actions
+      .map(action => `<button class="detail-menu-item" type="button" role="menuitem" data-action="${escapeHtml(action.name)}">${escapeHtml(action.name)}</button>`)
+      .join('') + '<div class="detail-menu-separator"></div><button class="detail-menu-item js-manage-actions" type="button" role="menuitem">Manage actions…</button>';
+  }
+
+  menu.querySelectorAll('[data-action]').forEach(item => {
+    item.addEventListener('click', () => runAction(rec, item.dataset.action));
+  });
+  menu.querySelector('.js-manage-actions')?.addEventListener('click', () => {
+    closeDetailMenus();
+    ViewManager.showSettings();
+    if (window.__nbpSwitchSettingsTab) window.__nbpSwitchSettingsTab('pipelines');
+  });
+}
+
+async function runAction(rec, actionName) {
+  closeDetailMenus();
+  activeArtifact = artifactKeyForPipeline(actionName);
+  try {
+    await invoke('assign_pipeline', { recordingId: rec.id, pipelineName: actionName });
+    await refreshPipelineArtifacts(rec.id);
+    const result = await invoke('execute_pipeline', { recordingId: rec.id, pipelineName: actionName });
+    const artifact = pipelineArtifacts.find(item => item.key === activeArtifact);
+    if (artifact) {
+      artifact.status = result === 'partial' ? 'partial' : 'done';
+      artifact.loaded = false;
+      await loadPipelineArtifact(rec.id, artifact);
+    }
+  } catch (error) {
+    console.error(`Action "${actionName}" failed:`, error);
+    showToast(`Action failed: ${error}`, 'error');
+  }
+  await loadRecordings();
+  if (state.selectedRecordingId === rec.id) renderArtifactTabs();
+}
+
+function formatPlaybackTime(milliseconds) {
+  const seconds = Math.max(0, Math.floor((milliseconds || 0) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`;
+}
+
+function updatePlaybackUi(playback = null) {
+  const playingThis = playback && playback.recording_id === detailPlaybackRecordingId;
+  const status = playingThis ? playback.status : 'Stopped';
+  const position = playingThis ? playback.current_position_ms : 0;
+  const duration = playingThis
+    ? (playback.duration_ms || detailAudioDurationMs)
+    : detailAudioDurationMs;
+  const currentEl = document.getElementById('detail-audio-current');
+  const durationEl = document.getElementById('detail-audio-duration');
+  const progressEl = document.getElementById('detail-playback-progress');
+  const playButton = document.getElementById('detail-play-btn');
+  const playIcon = document.querySelector('#detail-play-btn .detail-play-icon');
+  const pauseIcon = document.querySelector('#detail-play-btn .detail-pause-icon');
+  if (currentEl) currentEl.textContent = formatPlaybackTime(position);
+  if (durationEl) durationEl.textContent = formatPlaybackTime(duration);
+  if (progressEl) progressEl.style.width = duration > 0 ? `${Math.min(100, position / duration * 100)}%` : '0';
+  const isPlaying = status === 'Playing';
+  if (playIcon) playIcon.style.display = isPlaying ? 'none' : '';
+  if (pauseIcon) pauseIcon.style.display = isPlaying ? '' : 'none';
+  if (playButton) {
+    const label = isPlaying ? 'Pause recording' : 'Play recording';
+    playButton.title = label;
+    playButton.setAttribute('aria-label', label);
+  }
+}
+
+function startPlaybackPolling() {
+  if (playbackPollInterval) clearInterval(playbackPollInterval);
+  playbackPollInterval = setInterval(async () => {
+    try {
+      const playback = await invoke('get_playback_state');
+      updatePlaybackUi(playback);
+      if (playback.status === 'Stopped') {
+        clearInterval(playbackPollInterval);
+        playbackPollInterval = null;
+        detailPlaybackOwnsAudio = false;
+      }
+    } catch (_) { /* The player is optional; keep the rest of detail usable. */ }
+  }, 250);
+}
+
+function stopDetailPlayback() {
+  if (playbackPollInterval) {
+    clearInterval(playbackPollInterval);
+    playbackPollInterval = null;
+  }
+  if (detailPlaybackOwnsAudio) invoke('stop_audio').catch(() => {});
+  detailPlaybackRecordingId = null;
+  detailAudioDurationMs = 0;
+  detailPlaybackOwnsAudio = false;
+  const container = document.getElementById('detail-audio-player');
+  if (container) container.style.display = 'none';
+  updatePlaybackUi();
+}
+
+function loadDetailAudio(recordingId, rec) {
+  const container = document.getElementById('detail-audio-player');
+  if (!container) return;
+  detailPlaybackRecordingId = recordingId;
+  detailAudioDurationMs = Math.max(0, Math.round(getDuration(rec) * 1000));
+  container.style.display = rec.status === 'processing' ? 'none' : '';
+  updatePlaybackUi();
 }
 
 export async function showDetailView(id) {
   const rec = state.allRecordings.find(r => r.id === id);
   if (!rec) return;
 
+  if (detailRecordingId !== id) {
+    stopDetailPlayback();
+    detailRecordingId = id;
+    activeArtifact = 'transcript';
+    transcriptCopyText = '';
+    speakerArtifact = null;
+    pipelineArtifacts = [];
+    artifactRefreshGeneration++;
+    const processingSection = document.getElementById('pipeline-status-section');
+    if (processingSection) {
+      processingSection.dataset.userVisible = 'false';
+      processingSection.style.display = 'none';
+    }
+    const processingDetailsBtn = document.getElementById('show-processing-details-btn');
+    if (processingDetailsBtn) processingDetailsBtn.style.display = 'none';
+  }
+
   setSelectedRecordingId(id);
   stopProcessingPoll();
   clearTranscriptionTimer();
+  closeDetailMenus();
   updateMainButton();
 
   const detailTitleInput = document.getElementById('detail-title');
   const detailMetaHeaderEl = document.getElementById('detail-meta-header');
   const detailTranscriptEl = document.getElementById('transcript-content');
-  const detailStructuredEl = document.getElementById('structured-content');
   const deleteBtnHeader = document.getElementById('delete-btn-header');
   const openFolderBtnHeader = document.getElementById('open-folder-btn-header');
   const prBtn = document.getElementById('process-btn');
-  const saveTranscriptBtn = document.getElementById('save-transcript-btn');
 
   if (detailTitleInput) detailTitleInput.value = rec.title || '';
 
   renderCalendarRow(rec);
-  renderDiarization(rec);
+  syncPipelineArtifacts(rec.pipelines || []);
 
   const isProcessing = rec.status === 'processing';
 
@@ -356,43 +732,27 @@ export async function showDetailView(id) {
 
   ViewManager.showDetail();
   subscribeToProgress(id);
+  loadDetailAudio(id, rec);
+  renderDiarization(rec);
 
   if (deleteBtnHeader) {
+    deleteBtnHeader.disabled = isProcessing;
     deleteBtnHeader.style.opacity = isProcessing ? '0.3' : '1';
     deleteBtnHeader.style.pointerEvents = isProcessing ? 'none' : 'auto';
-    deleteBtnHeader.title = isProcessing ? 'Processing audio...' : 'Delete';
+    deleteBtnHeader.title = isProcessing ? 'Processing audio…' : 'Delete recording';
   }
   if (openFolderBtnHeader) {
-    openFolderBtnHeader.title = 'Open Folder';
+    openFolderBtnHeader.title = 'Reveal source files';
   }
 
   if (prBtn) {
     prBtn.disabled = isProcessing;
-    prBtn.style.opacity = '1';
-    if (isProcessing) {
-      prBtn.innerHTML = '<span style="font-weight: 600; font-size: 12px;">Mixing Audio...</span>';
-    } else {
-      prBtn.disabled = true;
-      prBtn.innerHTML = '<span style="font-weight: 600; font-size: 12px;">Transcribe</span>';
-      const checkId = id;
-      invoke('is_transcribing', { recordingId: checkId }).then(active => {
-        if (state.selectedRecordingId === checkId && prBtn) {
-          if (active) {
-            prBtn.innerHTML = '<span class="btn-spinner"></span><span style="font-weight: 600; font-size: 12px;">Auto-transcribing...</span>';
-            prBtn.style.opacity = '0.6';
-          } else {
-            prBtn.disabled = false;
-            prBtn.style.display = '';
-          }
-        }
-      }).catch(() => {
-        if (state.selectedRecordingId === checkId && prBtn) {
-          prBtn.disabled = false;
-          prBtn.style.display = '';
-        }
-      });
-    }
   }
+
+  const retranscribeBtn = document.getElementById('retranscribe-btn');
+  const rediarizeBtn = document.getElementById('rediariarize-btn');
+  if (retranscribeBtn) retranscribeBtn.disabled = isProcessing;
+  if (rediarizeBtn) rediarizeBtn.disabled = isProcessing;
 
   // Polling if processing — single active poller, guarded by a generation
   // counter so an in-flight tick from a prior poller becomes a no-op.
@@ -418,194 +778,59 @@ export async function showDetailView(id) {
     }, 1000);
   }
 
-  // Pipeline cards section
-  renderPipelineCards(id, isProcessing);
-
-  // Transcript section visibility
-  const hideContent = isProcessing;
-  const transcriptSection = document.getElementById('transcript-section');
-  if (transcriptSection) transcriptSection.style.display = hideContent ? 'none' : '';
-
-  renderPipelineStatus(id);
-
-  // Load Transcript
-  if (!hideContent && detailTranscriptEl) {
-    const rawToggle = document.getElementById('transcript-raw-toggle');
-
+  // The transcript is the stable source artifact. Processing, speakers and
+  // action results decorate it; they never replace or hide it.
+  if (detailTranscriptEl) {
+    if (isProcessing) {
+      transcriptCopyText = '';
+      detailTranscriptEl.innerHTML = `
+        <div class="transcript-processing-state">
+          <div class="transcript-processing-spinner"></div>
+          <span class="transcript-processing-text">Preparing recording…</span>
+        </div>`;
+      detailTranscriptEl.classList.remove('empty');
+      populateActionMenu(rec, false);
+      renderArtifactTabs();
+      return;
+    }
     try {
-      const isTranscribing = await invoke('is_transcribing', { recordingId: id });
       const transcript = await invoke('get_transcript', { recordingId: id });
+      if (state.selectedRecordingId !== id) return;
+      const isTranscribing = transcript
+        ? false
+        : await invoke('is_transcribing', { recordingId: id });
+      if (state.selectedRecordingId !== id) return;
+      if (prBtn) prBtn.disabled = isTranscribing;
+      if (retranscribeBtn) retranscribeBtn.disabled = isTranscribing;
 
       if (transcript) {
+        transcriptCopyText = transcript.trim();
         applyMarkdownRendering(detailTranscriptEl, transcript);
         detailTranscriptEl.classList.remove('empty');
-        if (saveTranscriptBtn) saveTranscriptBtn.style.display = '';
-        if (rawToggle) rawToggle.style.display = looksLikeMarkdown(transcript) ? '' : 'none';
       } else if (isTranscribing) {
+        transcriptCopyText = '';
         detailTranscriptEl.innerHTML = `
           <div class="transcript-processing-state">
             <div class="transcript-processing-spinner"></div>
-            <span class="transcript-processing-text">Processing audio...</span>
+            <span class="transcript-processing-text">Transcribing…</span>
           </div>
         `;
         detailTranscriptEl.classList.remove('empty');
-        if (saveTranscriptBtn) saveTranscriptBtn.style.display = 'none';
-        if (rawToggle) rawToggle.style.display = 'none';
       } else {
+        transcriptCopyText = '';
         detailTranscriptEl.textContent = 'Not processed yet.';
         detailTranscriptEl.classList.add('empty');
-        if (saveTranscriptBtn) saveTranscriptBtn.style.display = 'none';
-        if (rawToggle) rawToggle.style.display = 'none';
       }
+      populateActionMenu(rec, !!transcriptCopyText);
+      renderArtifactTabs();
     } catch (err) {
       console.error('Failed to load transcript:', err);
+      transcriptCopyText = '';
       detailTranscriptEl.textContent = 'Not processed yet.';
       detailTranscriptEl.classList.add('empty');
-      if (saveTranscriptBtn) saveTranscriptBtn.style.display = 'none';
-      if (rawToggle) rawToggle.style.display = 'none';
+      populateActionMenu(rec, false);
+      renderArtifactTabs();
     }
-  }
-
-  if (!hideContent && detailStructuredEl) {
-    detailStructuredEl.textContent = 'Not processed yet.';
-    detailStructuredEl.classList.add('empty');
-  }
-}
-
-// Pipeline cards: show available pipelines to assign to a recording
-let _pipelineCardAnimating = false;
-
-async function renderPipelineCards(id, isProcessing) {
-  const detailPipelineAssignment = document.getElementById('detail-pipeline-assignment');
-  const pipelineCardsEl = document.getElementById('pipeline-cards');
-  if (!detailPipelineAssignment || !pipelineCardsEl) return;
-
-  if (!isProcessing && pipelineState.allPipelineDefs && pipelineState.allPipelineDefs.length > 0) {
-    let alreadyUsed = new Set();
-    try {
-      const states = await invoke('get_all_pipeline_states', { recordingId: id });
-      if (states) for (const s of states) alreadyUsed.add(s.name);
-    } catch (_) { /* states may not exist yet */ }
-    const availableDefs = pipelineState.allPipelineDefs.filter(p => !alreadyUsed.has(p.name));
-
-    let cardsHtml = '';
-    for (const p of availableDefs) {
-      const flowHtml = renderPipelineFlowHTML(p.steps || [], { compact: true });
-      cardsHtml += `<div class="pipeline-card" data-pipeline="${escapeHtml(p.name)}">${flowHtml}<div class="pipeline-card-name">${escapeHtml(p.name)}</div></div>`;
-    }
-    pipelineCardsEl.innerHTML = cardsHtml;
-    detailPipelineAssignment.style.display = availableDefs.length > 0 ? '' : 'none';
-
-    // Click: assign → animate to runs → execute when possible
-    pipelineCardsEl.querySelectorAll('.pipeline-card').forEach(card => {
-      card.addEventListener('click', async () => {
-        if (_pipelineCardAnimating) return;
-        _pipelineCardAnimating = true;
-        const pipelineName = card.dataset.pipeline;
-
-        const statusSection = document.getElementById('pipeline-status-section');
-        const statusContent = document.getElementById('pipeline-status-content');
-        const target = statusContent || statusSection;
-        const cardRect = card.getBoundingClientRect();
-
-        // Create flying clone
-        const clone = card.cloneNode(true);
-        clone.style.cssText = `position:fixed;left:${cardRect.left}px;top:${cardRect.top}px;width:${cardRect.width}px;height:${cardRect.height}px;z-index:10000;pointer-events:none;margin:0;border-radius:var(--radius-sm);`;
-        document.body.appendChild(clone);
-
-        // Collapse original card
-        card.style.overflow = 'hidden';
-        card.style.pointerEvents = 'none';
-        card.style.maxWidth = card.offsetWidth + 'px';
-        card.style.minWidth = '0';
-        void card.offsetWidth;
-        card.style.transition = 'max-width 0.35s ease, padding 0.35s ease, border-width 0.35s ease, opacity 0.15s ease, margin 0.35s ease';
-        card.style.maxWidth = '0';
-        card.style.padding = '0';
-        card.style.borderWidth = '0';
-        card.style.margin = '0';
-        card.style.opacity = '0';
-
-        // Ensure runs section is visible for measuring
-        if (statusSection && statusSection.style.display === 'none') {
-          statusSection.style.display = '';
-          statusSection.style.opacity = '0';
-        }
-
-        // Fly clone to runs section
-        let dx = 0, dy = 120;
-        if (target) {
-          const targetRect = target.getBoundingClientRect();
-          dx = targetRect.left - cardRect.left;
-          dy = (targetRect.top + Math.min(targetRect.height, 40)) - cardRect.top;
-        }
-        clone.style.transition = 'transform 0.4s cubic-bezier(0.4, 0, 0.15, 1), opacity 0.35s ease-in, box-shadow 0.4s ease';
-        void clone.offsetWidth;
-        clone.style.transform = `translate(${dx}px, ${dy}px) scale(0.7)`;
-        clone.style.opacity = '0';
-        clone.style.boxShadow = '0 4px 24px rgba(var(--accent-rgb, 99,102,241), 0.3)';
-
-        // Backend: assign pipeline
-        state.currentAssignedPipelines.add(pipelineName);
-        let assigned = false;
-        try {
-          await invoke('assign_pipeline', { recordingId: id, pipelineName });
-          assigned = true;
-        } catch (err) {
-          console.error('Failed to assign pipeline:', err);
-        }
-
-        setTimeout(async () => {
-          clone.remove();
-          _pipelineCardAnimating = false;
-
-          if (statusSection) {
-            statusSection.style.display = '';
-            statusSection.style.opacity = '';
-          }
-
-          if (assigned) {
-            card.style.display = 'none';
-            // Execute when possible (transcript exists)
-            try {
-              const detailTranscriptEl = document.getElementById('transcript-content');
-              const hasTranscript = detailTranscriptEl && !detailTranscriptEl.classList.contains('empty');
-              if (hasTranscript) {
-                await invoke('execute_pipeline', { recordingId: id, pipelineName });
-              }
-            } catch (err) {
-              console.error('Failed to execute pipeline:', err);
-            }
-          } else {
-            // Restore card on failure
-            card.style.display = '';
-            card.style.maxWidth = '';
-            card.style.minWidth = '';
-            card.style.padding = '';
-            card.style.borderWidth = '';
-            card.style.margin = '';
-            card.style.opacity = '';
-            card.style.overflow = '';
-            card.style.pointerEvents = '';
-            card.style.transition = '';
-          }
-
-          await loadRecordings();
-          if (state.selectedRecordingId === id) renderPipelineStatus(id);
-
-          // Flash runs section
-          const flashTarget = document.getElementById('pipeline-status-content');
-          if (flashTarget) {
-            flashTarget.classList.remove('pipeline-status-flash');
-            void flashTarget.offsetWidth;
-            flashTarget.classList.add('pipeline-status-flash');
-          }
-        }, 420);
-      });
-    });
-  } else {
-    pipelineCardsEl.innerHTML = '<div style="color: var(--text-secondary); opacity: 0.75; font-size: 0.82rem;">No pipelines yet. Add one in Settings -> Pipelines.</div>';
-    detailPipelineAssignment.style.display = '';
   }
 }
 
@@ -613,25 +838,115 @@ async function renderPipelineCards(id, isProcessing) {
 const backBtn = document.getElementById('back-btn');
 if (backBtn) backBtn.addEventListener('click', hideDetailView);
 
-// Wire copy-transcript button in detail header. Copies what's actually shown
-// in #transcript-content (innerText keeps line breaks / speaker labels) so
-// the user gets the same view they see — not raw vs processed surprises.
+// The primary action always copies the selected artifact, without forcing the
+// user to hunt for an export flow or understand how it is stored on disk.
 const copyTranscriptBtn = document.getElementById('copy-transcript-btn-header');
 if (copyTranscriptBtn) {
   copyTranscriptBtn.addEventListener('click', async () => {
-    const el = document.getElementById('transcript-content');
-    const text = (el?.innerText || el?.textContent || '').trim();
-    if (!text) {
-      showToast('No transcript to copy', 'info');
-      return;
-    }
+    const text = (copyTranscriptBtn.dataset.copyText || '').trim();
+    if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
-      showToast('Transcript copied', 'success');
+      const label = document.getElementById('copy-artifact-label');
+      if (label) {
+        label.textContent = '✓ Copied';
+        setTimeout(() => {
+          label.textContent = copyTranscriptBtn.dataset.defaultLabel || 'Copy transcript';
+        }, 1200);
+      }
     } catch (e) {
-      console.error('copy transcript failed:', e);
+      console.error('Copy failed:', e);
       showToast('Copy failed', 'error');
     }
+  });
+}
+
+const runActionBtn = document.getElementById('run-action-btn');
+const runActionMenu = document.getElementById('run-action-menu');
+if (runActionBtn && runActionMenu) {
+  runActionBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openDetailMenu(runActionBtn, runActionMenu);
+  });
+  runActionMenu.addEventListener('click', event => event.stopPropagation());
+}
+
+const detailMoreBtn = document.getElementById('detail-more-btn');
+const detailMoreMenu = document.getElementById('detail-more-menu');
+if (detailMoreBtn && detailMoreMenu) {
+  detailMoreBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openDetailMenu(detailMoreBtn, detailMoreMenu);
+  });
+  detailMoreMenu.addEventListener('click', event => event.stopPropagation());
+}
+
+document.addEventListener('click', closeDetailMenus);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeDetailMenus();
+});
+
+const detailPlayBtn = document.getElementById('detail-play-btn');
+if (detailPlayBtn) {
+  detailPlayBtn.addEventListener('click', async () => {
+    if (!detailPlaybackRecordingId) return;
+    try {
+      const playback = await invoke('get_playback_state');
+      const isCurrent = playback.recording_id === detailPlaybackRecordingId;
+      if (isCurrent && playback.status === 'Playing') {
+        await invoke('pause_audio');
+      } else if (isCurrent && playback.status === 'Paused') {
+        await invoke('resume_audio');
+      } else {
+        await invoke('play_audio', { recordingId: detailPlaybackRecordingId });
+        detailPlaybackOwnsAudio = true;
+      }
+      const updated = await invoke('get_playback_state');
+      updatePlaybackUi(updated);
+      startPlaybackPolling();
+    } catch (error) {
+      console.error('Playback failed:', error);
+      showToast('Could not play this recording', 'error');
+    }
+  });
+}
+
+const retranscribeBtn = document.getElementById('retranscribe-btn');
+if (retranscribeBtn) {
+  retranscribeBtn.addEventListener('click', () => {
+    closeDetailMenus();
+    document.getElementById('process-btn')?.click();
+  });
+}
+
+const rediarizeBtn = document.getElementById('rediariarize-btn');
+if (rediarizeBtn) {
+  rediarizeBtn.addEventListener('click', () => {
+    closeDetailMenus();
+    const rec = state.allRecordings.find(item => item.id === state.selectedRecordingId);
+    if (rec) startDiarization(rec);
+  });
+}
+
+const showProcessingDetailsBtn = document.getElementById('show-processing-details-btn');
+if (showProcessingDetailsBtn) {
+  showProcessingDetailsBtn.addEventListener('click', async () => {
+    closeDetailMenus();
+    const section = document.getElementById('pipeline-status-section');
+    if (!section || !state.selectedRecordingId) return;
+    section.dataset.userVisible = 'true';
+    await renderPipelineStatus(state.selectedRecordingId);
+    if (section.dataset.hasData === 'true') section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+const hideProcessingDetailsBtn = document.getElementById('hide-processing-details-btn');
+if (hideProcessingDetailsBtn) {
+  hideProcessingDetailsBtn.addEventListener('click', () => {
+    const section = document.getElementById('pipeline-status-section');
+    if (!section) return;
+    section.dataset.userVisible = 'false';
+    section.style.display = 'none';
   });
 }
 
@@ -639,6 +954,7 @@ if (copyTranscriptBtn) {
 const deleteBtnHeader = document.getElementById('delete-btn-header');
 if (deleteBtnHeader) {
   deleteBtnHeader.addEventListener('click', async () => {
+    closeDetailMenus();
     if (!state.selectedRecordingId) return;
     const ok = await showConfirm('Delete Recording?', 'This action cannot be undone.');
     if (!ok) return;
@@ -661,6 +977,7 @@ if (deleteBtnHeader) {
 const openFolderBtnHeader = document.getElementById('open-folder-btn-header');
 if (openFolderBtnHeader) {
   openFolderBtnHeader.addEventListener('click', async () => {
+    closeDetailMenus();
     if (!state.selectedRecordingId || !state.appSettings?.storage_path) return;
     const folderPath = `${state.appSettings.storage_path}/${state.selectedRecordingId}`;
     try {
@@ -673,7 +990,6 @@ if (openFolderBtnHeader) {
 
 // Wire Transcribe button
 const processBtn = document.getElementById('process-btn');
-const saveTranscriptBtnGlobal = document.getElementById('save-transcript-btn');
 if (processBtn) {
   processBtn.addEventListener('click', async () => {
     if (!state.selectedRecordingId || processBtn.disabled) return;
@@ -685,6 +1001,10 @@ if (processBtn) {
       processBtn.style.opacity = '1';
       clearTranscriptionTimer();
       processBtn.innerHTML = '<span class="btn-spinner"></span><span style="font-weight: 600; font-size: 12px;">Processing...</span>';
+      transcriptCopyText = '';
+      const currentRec = state.allRecordings.find(item => item.id === recordingId);
+      if (currentRec) populateActionMenu(currentRec, false);
+      renderArtifactTabs();
 
       if (detailTranscriptEl) {
         detailTranscriptEl.innerHTML = `
@@ -695,8 +1015,6 @@ if (processBtn) {
         `;
         detailTranscriptEl.classList.remove('empty');
       }
-      if (saveTranscriptBtnGlobal) saveTranscriptBtnGlobal.style.display = 'none';
-
       const transcript = await invoke('transcribe_recording', { recordingId });
 
       if (transcript === '__already_running__') {
@@ -708,7 +1026,10 @@ if (processBtn) {
         applyMarkdownRendering(detailTranscriptEl, transcript);
         detailTranscriptEl.classList.remove('empty');
       }
-      if (saveTranscriptBtnGlobal) saveTranscriptBtnGlobal.style.display = '';
+      transcriptCopyText = (transcript || '').trim();
+      const rec = state.allRecordings.find(item => item.id === recordingId);
+      if (rec) populateActionMenu(rec, !!transcriptCopyText);
+      renderArtifactTabs();
 
       // Auto-execute waiting pipelines
       try {
@@ -735,6 +1056,8 @@ if (processBtn) {
         detailTranscriptEl.textContent = 'Transcription failed.';
         detailTranscriptEl.classList.add('empty');
       }
+      transcriptCopyText = '';
+      renderArtifactTabs();
 
       processBtn.innerHTML = '<span style="font-weight: 600; font-size: 12px;">Transcribe</span>';
       processBtn.disabled = false;
@@ -767,11 +1090,22 @@ listen('transcription_progress', (event) => {
           if (transcript) {
             applyMarkdownRendering(detailTranscriptEl, transcript);
             detailTranscriptEl.classList.remove('empty');
+            transcriptCopyText = transcript.trim();
+            const rec = state.allRecordings.find(item => item.id === recording_id);
+            if (rec) populateActionMenu(rec, true);
+            renderArtifactTabs();
           }
         })
         .catch((err) => console.error('get_transcript post-Done failed:', err));
     }
     return;
+  }
+
+  if (transcriptCopyText) {
+    transcriptCopyText = '';
+    const rec = state.allRecordings.find(item => item.id === recording_id);
+    if (rec) populateActionMenu(rec, false);
+    renderArtifactTabs();
   }
 
   const STAGE_LABELS = {
@@ -808,4 +1142,31 @@ listen('transcription_progress', (event) => {
         </div>`;
     }
   }
+});
+
+on('recording:artifactsChanged', change => {
+  if (typeof change === 'string') {
+    if (change === state.selectedRecordingId) refreshPipelineArtifacts(change);
+    return;
+  }
+
+  const recordingId = change?.recording_id;
+  if (!recordingId || recordingId !== state.selectedRecordingId) return;
+  const key = artifactKeyForPipeline(change.pipeline_name);
+  const artifact = pipelineArtifacts.find(item => item.key === key);
+  if (!artifact) {
+    refreshPipelineArtifacts(recordingId);
+    return;
+  }
+
+  if (change.status === 'failed') {
+    artifact.status = 'partial';
+    artifact.loaded = false;
+  } else if (change.status === 'running') {
+    artifact.status = 'running';
+  } else if (change.status === 'done' && change.step_index + 1 === change.total_steps) {
+    artifact.status = 'done';
+    artifact.loaded = false;
+  }
+  renderArtifactTabs();
 });
