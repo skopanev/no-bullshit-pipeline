@@ -7,6 +7,13 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <div id="audio-drop-overlay" class="audio-drop-overlay" role="status" aria-live="polite" hidden>
+      <div class="audio-drop-prompt">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+        <strong>DROP AUDIO FILES HERE</strong>
+        <span>WAV · MP3 · M4A · AAC · FLAC · OGG · QTA</span>
+      </div>
+    </div>
     <!-- Main app bar (Capture & Detail Controls) -->
     <header class="app-bar" data-tauri-drag-region>
       <div class="app-logo" data-tauri-drag-region>
@@ -81,7 +88,7 @@
         </div>
         <div id="empty-state" class="empty-state" style="display: none">
           <div class="empty-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg></div>
-          <p>No recordings yet. Press Record.</p>
+          <p>No recordings yet. Press Record or drop audio files here.</p>
         </div>
       </section>
 

@@ -33,6 +33,7 @@ pub mod app_icons;
 mod asr_models;
 mod audio;
 mod audio_capture;
+mod audio_import;
 mod audio_process_detector;
 pub mod audio_processing;
 mod calendar;
@@ -426,6 +427,7 @@ pub fn run() {
             audio::pause_recording,
             audio::resume_recording,
             storage::list_recordings,
+            audio_import::import_audio_file,
             storage::read_metadata,
             storage::update_title,
             storage::delete_recording,

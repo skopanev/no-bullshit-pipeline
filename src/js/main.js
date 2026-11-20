@@ -4,7 +4,7 @@ import * as state from './core/state.js';
 import { escapeHtml } from './core/utils.js';
 import { on, emit } from './core/events.js';
 import { trace } from './ignore-trace.js';
-import { checkForUpdates } from './updater.js';
+import { initUpdateChecks } from './updater.js';
 
 // UI
 import './ui/confirm-modal.js';
@@ -27,6 +27,7 @@ import { loadRecordings, renderRecordingsList } from './recording/list.js';
 // only the "Transcribing…" status changes — no need to refetch all metadata.
 import { showDetailView, hideDetailView } from './recording/detail.js';
 import { autoTranscribeAndExecute } from './recording/auto-execute.js';
+import { initAudioImport } from './recording/audio-import.js';
 
 // Pipeline
 import { loadPipelineDefs } from './pipeline/defs-list.js';
@@ -81,8 +82,9 @@ async function init() {
     if (versionEl) versionEl.textContent = `v${version} `;
   } catch (err) { console.error('Failed to fetch version:', err); }
 
-  // Background update check — silent on failure / no-newer-version.
-  checkForUpdates();
+  // Background update check (startup + focus, at most once per 24h) — silent on
+  // failure / no-newer-version.
+  initUpdateChecks();
 
   // ASR model version check for the active engine (server-side throttled to
   // daily; the banner only appears on a real, non-dismissed signal).
@@ -237,6 +239,7 @@ async function bootstrapApp() {
   initModelVersion();
 
   await init().catch(e => console.error('Init failed:', e));
+  await initAudioImport();
   initHealthCheck();
   scheduleAudit(state.appSettings);
 }

@@ -8,6 +8,7 @@ import { showConfirm } from '../ui/confirm-modal.js';
 import { showToast } from '../ui/toast.js';
 import { allPipelineDefs } from '../pipeline/state.js';
 import { renderPipelineFlowHTML } from '../pipeline/flow-renderer.js';
+import { buildImportRow } from './import-progress.js';
 
 // Stable per-day key for grouping recordings into date sections.
 function dateSectionKey(createdAt) {
@@ -139,6 +140,7 @@ async function hydrateAppIcons() {
 }
 
 function buildRowHtml(rec) {
+  if (rec.status === 'importing' || rec.status === 'import_queued') return buildImportRow(rec);
   const isProcessing = rec.status === 'processing';
   const isRecordingStatus = rec.status === 'recording';
   const isCurrentlyRecording = state.isRecording && state.selectedRecordingId === rec.id;
@@ -432,7 +434,9 @@ export function renderRecordingsList() {
   const emptyStateEl = document.getElementById('empty-state');
   if (!recordingsListEl) return;
 
-  if (state.allRecordings.length === 0) {
+  const visibleRecordings = [...state.pendingImports.values(), ...state.allRecordings]
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  if (visibleRecordings.length === 0) {
     if (renderedNodes.size > 0 || recordingsListEl.firstChild) {
       recordingsListEl.innerHTML = '';
       renderedNodes.clear();
@@ -447,7 +451,7 @@ export function renderRecordingsList() {
   // so days fall out in order.
   const nodes = [];
   let lastSectionKey = null;
-  for (const rec of state.allRecordings) {
+  for (const rec of visibleRecordings) {
     const secKey = dateSectionKey(rec.created_at);
     if (secKey !== lastSectionKey) {
       lastSectionKey = secKey;

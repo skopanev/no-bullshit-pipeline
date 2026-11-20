@@ -125,9 +125,55 @@ fn png_to_data_url(bytes: &[u8]) -> String {
 /// generic placeholder icon, so we strip the `.helper…` tail and resolve the
 /// parent app, which has the real icon. Non-helper ids pass through unchanged.
 fn normalize_bundle_id(bundle_id: &str) -> &str {
+    // Safari's "Graphics and Media" process supplies this CoreAudio bundle
+    // id for browser calls. It is not an installed .app, so use Safari's icon.
+    // Normalize at lookup time to fix recordings already stored with this id.
+    if bundle_id.eq_ignore_ascii_case("com.apple.WebKit.GPU") {
+        return "com.apple.Safari";
+    }
     match bundle_id.to_ascii_lowercase().find(".helper") {
         Some(idx) if idx > 0 => &bundle_id[..idx],
         _ => bundle_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_bundle_id;
+
+    #[test]
+    fn safari_media_process_uses_safari_icon() {
+        assert_eq!(
+            normalize_bundle_id("com.apple.WebKit.GPU"),
+            "com.apple.Safari"
+        );
+        assert_eq!(
+            normalize_bundle_id("com.apple.webkit.gpu"),
+            "com.apple.Safari"
+        );
+    }
+
+    #[test]
+    fn electron_helpers_still_use_parent_icons() {
+        assert_eq!(
+            normalize_bundle_id("com.google.Chrome.helper.renderer"),
+            "com.google.Chrome"
+        );
+        assert_eq!(
+            normalize_bundle_id("com.tinyspeck.slackmacgap.helper"),
+            "com.tinyspeck.slackmacgap"
+        );
+    }
+
+    #[test]
+    fn other_bundle_ids_are_unchanged() {
+        for id in [
+            "com.apple.Safari",
+            "com.apple.WebKit.Networking",
+            "org.example.WebKitApp",
+        ] {
+            assert_eq!(normalize_bundle_id(id), id);
+        }
     }
 }
 

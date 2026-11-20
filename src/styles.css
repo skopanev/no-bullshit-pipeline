@@ -1,5 +1,55 @@
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
 
+.audio-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.audio-drop-overlay[hidden] { display: none; }
+
+.audio-drop-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 20px;
+  border: 2px dashed var(--accent);
+  border-radius: 20px;
+}
+
+.audio-drop-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  text-align: center;
+  color: var(--text-primary);
+  animation: audio-drop-enter 160ms ease-out;
+}
+
+.audio-drop-prompt svg { color: var(--accent); }
+.audio-drop-prompt strong {
+  font-size: clamp(22px, 4vw, 40px);
+  line-height: 1.2;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+}
+.audio-drop-prompt span { color: var(--text-secondary); font-size: 14px; }
+
+@keyframes audio-drop-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .audio-drop-prompt { animation: none; }
+}
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui,
     "Helvetica Neue", sans-serif;
@@ -721,6 +771,18 @@ body.detail-open .detail-view {
 .recording-item:active {
   transform: scale(0.98) translateY(0);
   transition: all 0.08s;
+}
+
+.recording-item-importing,
+.recording-item-importing:hover,
+.recording-item-importing:active {
+  cursor: progress;
+  transform: none;
+  padding-right: 1.25rem;
+}
+.recording-item-importing .recording-meta { color: var(--accent); opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .recording-item-importing .btn-spinner { animation: none; }
 }
 
 .recording-title {

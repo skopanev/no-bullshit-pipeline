@@ -33,7 +33,8 @@ pub struct RecordingMetadata {
     #[serde(default)]
     pub app_bundle_id: Option<String>,
     /// What produced this recording: "manual" (user clicked record),
-    /// "call" (auto-detected meeting), "dictation" (Quick Dictate save).
+    /// "call" (auto-detected meeting), "dictation" (Quick Dictate save),
+    /// "import" (external audio file).
     /// Future-proofs filtering / stats / UI badges without parsing the title
     /// format. Defaults to "manual" for older metadata files (back-compat).
     #[serde(default = "default_recording_source")]

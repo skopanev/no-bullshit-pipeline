@@ -1,6 +1,6 @@
 [package]
 name = "nbp"
-version = "0.7.5"
+version = "0.7.6"
 description = "A Tauri App"
 authors = ["sk"]
 edition = "2024"
@@ -73,6 +73,13 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 strip = true
 lto = true
 codegen-units = 1
+
+# Keep the native audio codec fast even when the app runs in development mode.
+[profile.dev.package.aotuv_lancer_vorbis_sys]
+opt-level = 3
+
+[profile.dev.package.vorbis_rs]
+opt-level = 3
 
 [dev-dependencies]
 tempfile = "3.27"
