@@ -14,6 +14,8 @@ export let pipelineRunningSteps = {};
 /// transcription_progress listener in main.js. Read by list rendering to
 /// show "Transcribing…" on the affected row.
 export const transcribingIds = new Set();
+// Imported recordings waiting for their turn; not actively transcribing yet.
+export const queuedTranscriptionIds = new Set();
 // Optimistic rows exist only until an external file has finished importing.
 export const pendingImports = new Map();
 

@@ -10,6 +10,8 @@ use uuid::Uuid;
 use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
 mod native;
+#[cfg(target_os = "macos")]
+pub(crate) mod promised;
 
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "aac", "flac", "ogg", "qta"];
 
@@ -24,11 +26,18 @@ impl Drop for StagingDir {
 
 #[tauri::command]
 pub async fn import_audio_file(path: String) -> Result<RecordingMetadata, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        import_into(Path::new(&path), &storage::get_data_dir())
-    })
-    .await
-    .map_err(|e| format!("Audio import failed: {e}"))?
+    import_path(PathBuf::from(path)).await
+}
+
+// Native file promises and JS file drops share one encoder slot. A batch of
+// promised exports must not launch an encoder (and its buffers) per file.
+static IMPORT_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+async fn import_path(path: PathBuf) -> Result<RecordingMetadata, String> {
+    let _slot = IMPORT_SLOT.acquire().await.map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || import_into(&path, &storage::get_data_dir()))
+        .await
+        .map_err(|e| format!("Audio import failed: {e}"))?
 }
 
 fn import_into(source: &Path, data_dir: &Path) -> Result<RecordingMetadata, String> {
@@ -55,7 +64,7 @@ fn import_into(source: &Path, data_dir: &Path) -> Result<RecordingMetadata, Stri
     let original = staging.0.join(format!("source.{extension}"));
     fs::copy(source, &original).map_err(|e| format!("Cannot copy audio: {e}"))?;
     let mix = staging.0.join("audio_mix.ogg");
-    let audio = if extension == "qta" {
+    let audio = if extension == "qta" || extension == "m4a" {
         native::encode_qta(&original, &mix)?
     } else {
         encode_mix(&original, &mix)?
@@ -254,6 +263,8 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&result.stderr)
             );
+            let m4a = import_into(&encoded, &data).unwrap();
+            assert!(m4a.audio.mix.unwrap().duration_sec > 0.9);
             let qta = temp.path().join(format!("New Recording 65 {codec}.qta"));
             fs::rename(encoded, &qta).unwrap();
             let bytes = fs::read(&qta).unwrap();

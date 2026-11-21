@@ -5,9 +5,15 @@ let invokeCalls, notifications, nativeHandler, windowHandlers;
 let failImport, failTranscription, failRegistration;
 let refreshes;
 let importGate;
+let nativeListeners;
+let transcriptionGates, transcriptionFailures;
 const overlay = { hidden: true };
 
 mock.module('../src/js/core/tauri.js', () => ({
+  listen: async (name, callback) => {
+    nativeListeners.set(name, callback);
+    return () => nativeListeners.delete(name);
+  },
   invoke: async (command, args) => {
     invokeCalls.push([command, args]);
     if (command === 'import_audio_file') {
@@ -15,7 +21,10 @@ mock.module('../src/js/core/tauri.js', () => ({
       if (failImport) throw new Error('Cannot decode audio');
       return { id: args.path, title: 'Imported audio', source: 'import' };
     }
-    if (command === 'transcribe_recording' && failTranscription) throw new Error('ASR failed');
+    if (command === 'transcribe_recording') {
+      if (transcriptionGates.has(args.recordingId)) await transcriptionGates.get(args.recordingId);
+      if (failTranscription || transcriptionFailures.has(args.recordingId)) throw new Error('ASR failed');
+    }
     return 'Transcript';
   },
 }));
@@ -37,6 +46,9 @@ beforeEach(() => {
   nativeHandler = null;
   refreshes = 0;
   importGate = null;
+  nativeListeners = new Map();
+  transcriptionGates = new Map();
+  transcriptionFailures = new Set();
   failImport = failTranscription = failRegistration = false;
   windowHandlers = new Map();
   overlay.hidden = true;
@@ -58,6 +70,7 @@ afterEach(() => {
   globalThis.document = oldDocument;
   state.setIsRecording(false);
   state.transcribingIds.clear();
+  state.queuedTranscriptionIds.clear();
   state.pendingImports.clear();
 });
 
@@ -128,10 +141,109 @@ test('a named row is queued immediately and remains visible while decoding', asy
 
 test('ASR errors remain visible and remove the stale transcribing badge', async () => {
   failTranscription = true;
-  state.transcribingIds.add('/tmp/a.wav');
   await initAudioImport();
   await nativeHandler({ payload: { type: 'drop', paths: ['/tmp/a.wav'] } });
   await Bun.sleep(0);
   expect(state.transcribingIds.has('/tmp/a.wav')).toBe(false);
   expect(notifications.some(([text, type]) => type === 'error' && text.includes('transcription failed'))).toBe(true);
+});
+
+test('an already active recording is not rescheduled or stripped of its badge', async () => {
+  state.transcribingIds.add('saved-active');
+  await initAudioImport();
+  const receive = nativeListeners.get('audio-import-native');
+  await receive({ payload: { id: 'import-active', phase: 'complete', recording_id: 'saved-active' } });
+  await Bun.sleep(0);
+  expect(invokeCalls).toEqual([]);
+  expect([...state.transcribingIds]).toEqual(['saved-active']);
+  expect(state.queuedTranscriptionIds.size).toBe(0);
+});
+
+test('app-to-app promises show receiving progress and transcribe the already imported file once', async () => {
+  await initAudioImport();
+  const receive = nativeListeners.get('audio-import-native');
+  await receive({ payload: { id: 'promise-1', phase: 'receiving', title: 'Voice Memo.m4a' } });
+  expect(state.pendingImports.get('promise-1').status).toBe('import_receiving');
+  await receive({ payload: { id: 'import-1', phase: 'importing', title: 'Voice Memo.m4a' } });
+  await receive({ payload: { id: 'promise-1', phase: 'received' } });
+  expect(state.pendingImports.size).toBe(1);
+  await receive({ payload: { id: 'import-1', phase: 'complete', title: 'Voice Memo', recording_id: 'saved-1' } });
+  await Bun.sleep(0);
+  expect(state.pendingImports.size).toBe(0);
+  expect(invokeCalls).toEqual([['transcribe_recording', { recordingId: 'saved-1' }]]);
+  expect(refreshes).toBe(2);
+});
+
+test('promise export errors remove their row and surface an actionable error', async () => {
+  await initAudioImport();
+  const receive = nativeListeners.get('audio-import-native');
+  await receive({ payload: { id: 'promise-1', phase: 'receiving', title: 'Voice Memo' } });
+  await receive({ payload: { id: 'promise-1', phase: 'error', title: 'Voice Memo', error: 'Export failed' } });
+  expect(state.pendingImports.size).toBe(0);
+  expect(notifications.some(([text, type]) => type === 'error' && text.includes('Export failed'))).toBe(true);
+  expect(invokeCalls).toEqual([]);
+});
+
+test('68 stays active while 69 is visibly queued, then status moves to 69 by ID', async () => {
+  let finish68, finish69;
+  transcriptionGates.set('saved-68', new Promise(resolve => { finish68 = resolve; }));
+  transcriptionGates.set('saved-69', new Promise(resolve => { finish69 = resolve; }));
+  await initAudioImport();
+  const receive = nativeListeners.get('audio-import-native');
+  await receive({ payload: { id: 'import-68', phase: 'complete', title: 'New Recording 68', recording_id: 'saved-68' } });
+  await receive({ payload: { id: 'import-69', phase: 'complete', title: 'New Recording 69', recording_id: 'saved-69' } });
+  expect([...state.transcribingIds]).toEqual(['saved-68']);
+  expect([...state.queuedTranscriptionIds]).toEqual(['saved-69']);
+  expect(invokeCalls).toEqual([['transcribe_recording', { recordingId: 'saved-68' }]]);
+
+  // A repeated completion event must not schedule a second ASR job.
+  await receive({ payload: { id: 'import-69', phase: 'complete', recording_id: 'saved-69' } });
+  finish68();
+  await Bun.sleep(0);
+  expect([...state.transcribingIds]).toEqual(['saved-69']);
+  expect(state.queuedTranscriptionIds.size).toBe(0);
+  expect(invokeCalls).toEqual([
+    ['transcribe_recording', { recordingId: 'saved-68' }],
+    ['transcribe_recording', { recordingId: 'saved-69' }],
+  ]);
+  finish69();
+  await Bun.sleep(0);
+  expect(state.transcribingIds.size).toBe(0);
+  expect(state.queuedTranscriptionIds.size).toBe(0);
+});
+
+test('a failed ASR clears its status and starts the next queued recording', async () => {
+  let finish68, finish69;
+  transcriptionGates.set('saved-68', new Promise(resolve => { finish68 = resolve; }));
+  transcriptionGates.set('saved-69', new Promise(resolve => { finish69 = resolve; }));
+  transcriptionFailures.add('saved-68');
+  await initAudioImport();
+  const receive = nativeListeners.get('audio-import-native');
+  await receive({ payload: { id: 'import-68', phase: 'complete', title: 'New Recording 68', recording_id: 'saved-68' } });
+  await receive({ payload: { id: 'import-69', phase: 'complete', title: 'New Recording 69', recording_id: 'saved-69' } });
+  finish68();
+  await Bun.sleep(0);
+  expect([...state.transcribingIds]).toEqual(['saved-69']);
+  expect(state.queuedTranscriptionIds.size).toBe(0);
+  expect(notifications.some(([text, type]) => type === 'error' && text.includes('New Recording 68'))).toBe(true);
+  finish69();
+  await Bun.sleep(0);
+  expect(state.transcribingIds.size).toBe(0);
+});
+
+test('normal file drops use the same queued/active transcription states', async () => {
+  let finishFirst, finishSecond;
+  transcriptionGates.set('/tmp/first.wav', new Promise(resolve => { finishFirst = resolve; }));
+  transcriptionGates.set('/tmp/second.wav', new Promise(resolve => { finishSecond = resolve; }));
+  await initAudioImport();
+  await nativeHandler({ payload: { type: 'drop', paths: ['/tmp/first.wav', '/tmp/second.wav'] } });
+  expect([...state.transcribingIds]).toEqual(['/tmp/first.wav']);
+  expect([...state.queuedTranscriptionIds]).toEqual(['/tmp/second.wav']);
+  finishFirst();
+  await Bun.sleep(0);
+  expect([...state.transcribingIds]).toEqual(['/tmp/second.wav']);
+  expect(state.queuedTranscriptionIds.size).toBe(0);
+  finishSecond();
+  await Bun.sleep(0);
+  expect(state.transcribingIds.size).toBe(0);
 });

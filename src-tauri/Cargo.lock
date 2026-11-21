@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "nbp"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "audioadapter",
@@ -2794,6 +2794,7 @@ dependencies = [
  "llama-cpp-2",
  "log",
  "objc2",
+ "objc2-app-kit",
  "objc2-event-kit",
  "objc2-foundation",
  "objc2-user-notifications",

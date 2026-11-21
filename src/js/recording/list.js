@@ -9,6 +9,7 @@ import { showToast } from '../ui/toast.js';
 import { allPipelineDefs } from '../pipeline/state.js';
 import { renderPipelineFlowHTML } from '../pipeline/flow-renderer.js';
 import { buildImportRow } from './import-progress.js';
+import { getTranscriptionStatus } from './transcription-status.js';
 
 // Stable per-day key for grouping recordings into date sections.
 function dateSectionKey(createdAt) {
@@ -140,21 +141,21 @@ async function hydrateAppIcons() {
 }
 
 function buildRowHtml(rec) {
-  if (rec.status === 'importing' || rec.status === 'import_queued') return buildImportRow(rec);
+  if (['importing', 'import_queued', 'import_receiving'].includes(rec.status)) return buildImportRow(rec);
   const isProcessing = rec.status === 'processing';
   const isRecordingStatus = rec.status === 'recording';
   const isCurrentlyRecording = state.isRecording && state.selectedRecordingId === rec.id;
-  const isTranscribing = state.transcribingIds && state.transcribingIds.has(rec.id);
+  const transcriptionStatus = getTranscriptionStatus(rec.id);
 
   // Status text takes priority over duration when an action is in flight.
-  // Order: recording > processing > transcribing > duration (idle).
+  // Order: recording > processing > transcribing/queued > duration (idle).
   let metaText;
   if (isRecordingStatus) {
     metaText = recordingStatusHtml(rec);
   } else if (isProcessing) {
     metaText = '<span style="color:var(--accent)">Processing…</span>';
-  } else if (isTranscribing) {
-    metaText = '<span style="color:var(--accent)">Transcribing…</span>';
+  } else if (transcriptionStatus) {
+    metaText = `<span style="color:var(--accent)" role="status">${transcriptionStatus}</span>`;
   } else {
     metaText = formatDuration(getDuration(rec));
   }

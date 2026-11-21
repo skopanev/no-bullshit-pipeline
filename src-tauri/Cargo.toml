@@ -1,6 +1,6 @@
 [package]
 name = "nbp"
-version = "0.7.6"
+version = "0.7.7"
 description = "A Tauri App"
 authors = ["sk"]
 edition = "2024"
@@ -19,7 +19,8 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 tauri = { version = "2.11", features = ["tray-icon", "macos-private-api"] }
-objc2 = "0.6"
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSPasteboard", "NSFilePromiseReceiver", "NSDragging", "block2"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSObject", "NSProcessInfo", "NSDate", "NSArray", "NSURL"] }
 # EventKit (read-only calendar matching). 0.3.x pairs with objc2 0.6 /
 # objc2-foundation 0.3; default features expose EKEventStore/EKEvent/

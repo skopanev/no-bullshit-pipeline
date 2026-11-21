@@ -414,6 +414,11 @@ pub fn run() {
             // (see wake_observer.rs for the full reasoning).
             wake_observer::install(app.handle().clone());
 
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                audio_import::promised::install(&window)?;
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

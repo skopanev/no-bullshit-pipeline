@@ -244,8 +244,8 @@ async function bootstrapApp() {
   scheduleAudit(state.appSettings);
 }
 
-if (document.readyState === 'complete') {
-  setTimeout(bootstrapApp, 0);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', bootstrapApp, { once: true });
 } else {
-  window.addEventListener('load', bootstrapApp, { once: true });
+  bootstrapApp();
 }
