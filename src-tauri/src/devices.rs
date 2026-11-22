@@ -77,3 +77,56 @@ pub fn get_device_by_name(name: &str) -> Option<cpal::Device> {
             == Some(name)
     })
 }
+
+/// A pinned recording input must never silently become headphones or another
+/// default input. Quick Dictate retains its own independent selection policy.
+pub(crate) fn recording_device(name: Option<&str>) -> Result<cpal::Device, String> {
+    choose_recording_device(name, get_device_by_name, || {
+        cpal::default_host().default_input_device()
+    })
+}
+
+fn choose_recording_device<T>(
+    name: Option<&str>,
+    named: impl FnOnce(&str) -> Option<T>,
+    default: impl FnOnce() -> Option<T>,
+) -> Result<T, String> {
+    match name {
+        Some(name) => named(name).ok_or_else(|| format!(
+            "Recording microphone '{name}' is unavailable. Select another microphone before recording."
+        )),
+        None => default()
+            .ok_or_else(|| "No recording microphone is available.".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pinned_input_never_falls_back_to_headphones() {
+        let selected = choose_recording_device(
+            Some("MacBook Microphone"),
+            |name| {
+                assert_eq!(name, "MacBook Microphone");
+                Some("built-in")
+            },
+            || panic!("must not read system default for a pinned microphone"),
+        );
+        assert_eq!(selected.unwrap(), "built-in");
+        let missing = choose_recording_device::<&str>(
+            Some("Unplugged USB Mic"),
+            |_| None,
+            || panic!("must not silently substitute headphones"),
+        );
+        assert!(missing.unwrap_err().contains("Unplugged USB Mic"));
+    }
+    #[test]
+    fn system_default_is_explicit_and_missing_input_is_an_error() {
+        assert_eq!(
+            choose_recording_device(None, |_| None, || Some("system input")).unwrap(),
+            "system input"
+        );
+        assert!(choose_recording_device::<()>(None, |_| None, || None).is_err());
+    }
+}

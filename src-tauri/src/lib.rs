@@ -55,6 +55,7 @@ mod pipeline_engine;
 pub mod pipelines;
 pub mod playback;
 pub mod realtime_transcription;
+mod recording_input;
 mod resampler_compat;
 pub mod storage;
 mod system_audio;
@@ -467,6 +468,8 @@ pub fn run() {
             playback::get_playback_state,
             waveform::get_waveform_data,
             devices::get_input_devices,
+            recording_input::get_recording_input,
+            recording_input::set_recording_microphone,
             get_audio_level,
             get_audio_levels,
             // Pipeline system
@@ -1158,6 +1161,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
 
     match capture_coordinator::snapshot() {
         CaptureActivity::Idle => {
+            let microphone_source = recording_input::tray_source_item(app)?;
             let start_item =
                 MenuItemBuilder::with_id("tray-record-new", "Start Recording").build(app)?;
 
@@ -1207,6 +1211,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
                 MenuItemBuilder::with_id("tray-settings", "Settings…").build(app)?;
 
             MenuBuilder::new(app)
+                .item(&microphone_source)
                 .item(&start_item)
                 .item(&pipeline_submenu)
                 .separator()
@@ -1237,6 +1242,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
             let title_item = MenuItemBuilder::with_id("tray-recording-title", title)
                 .enabled(false)
                 .build(app)?;
+            let microphone = recording_input::tray_active_item(app)?;
             let stop_item =
                 MenuItemBuilder::with_id("tray-stop-recording", "Stop && Save Recording")
                     .build(app)?;
@@ -1251,6 +1257,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
             MenuBuilder::new(app)
                 .item(&status)
                 .item(&title_item)
+                .item(&microphone)
                 .separator()
                 .item(&stop_item)
                 .item(&open_recording_item)
@@ -1380,6 +1387,7 @@ const TRAY_ID: &str = "nbp-main";
 /// second timer or extra wakeups.
 fn update_tray_capture_display(app: &tauri::AppHandle) {
     use capture_coordinator::CaptureActivity;
+    recording_input::update_tray_meter(app);
 
     let (status, tooltip) = match capture_coordinator::snapshot() {
         CaptureActivity::Recording { started_at, .. } => (

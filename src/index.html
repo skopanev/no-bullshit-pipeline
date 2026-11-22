@@ -277,6 +277,17 @@
                 <h3>Recording</h3>
                 <div class="settings-item">
                   <div class="settings-info">
+                    <label for="settings-recording-device">Microphone</label>
+                    <p>Used for new recordings and meetings. Changes apply to the next recording; Dictation uses its own microphone settings.</p>
+                  </div>
+                  <div class="settings-input-group" style="justify-content: flex-end">
+                    <select id="settings-recording-device" class="settings-select" aria-label="Recording microphone">
+                      <option value="">System default</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-info">
                     <label>Auto-record meetings</label>
                     <p>Automatically start recording when a call is detected. When off, no calls are detected and no popup is shown.</p>
                   </div>

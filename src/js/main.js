@@ -28,6 +28,7 @@ import { loadRecordings, renderRecordingsList } from './recording/list.js';
 import { showDetailView, hideDetailView } from './recording/detail.js';
 import { autoTranscribeAndExecute } from './recording/auto-execute.js';
 import { initAudioImport } from './recording/audio-import.js';
+import { initRecordingMicrophone } from './recording/microphone.js';
 
 // Pipeline
 import { loadPipelineDefs } from './pipeline/defs-list.js';
@@ -240,6 +241,7 @@ async function bootstrapApp() {
 
   await init().catch(e => console.error('Init failed:', e));
   await initAudioImport();
+  await initRecordingMicrophone();
   initHealthCheck();
   scheduleAudit(state.appSettings);
 }

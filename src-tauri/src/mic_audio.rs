@@ -2,7 +2,7 @@ use crate::resampler_compat::{
     SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use anyhow::Result;
-use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::traits::DeviceTrait;
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Split},
@@ -32,6 +32,14 @@ lazy_static::lazy_static! {
 // STARTS minus the number of STOP logs reveals an imbalance.
 static ACTIVE_MIC_STREAMS: AtomicUsize = AtomicUsize::new(0);
 static MIC_START_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LAST_LEVEL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// Number of live mic capture streams right now (should be 0 idle, 1 recording).
 pub fn active_mic_streams() -> usize {
@@ -42,18 +50,28 @@ pub fn active_mic_streams() -> usize {
 /// pipeline and the Quick Dictate ephemeral stream so the UI meter reads from
 /// a single source of truth.
 pub(crate) fn set_audio_level(level: f32) {
-    let level_u32 = level.clamp(0.0, 1.0).to_bits();
+    let level_u32 = if level.is_finite() {
+        level.clamp(0.0, 1.0).to_bits()
+    } else {
+        0
+    };
     CURRENT_AUDIO_LEVEL.store(level_u32, Ordering::Relaxed);
+    LAST_LEVEL_MS.store(now_ms(), Ordering::Relaxed);
 }
 
 /// Get the current audio level (0.0 - 1.0)
 pub fn get_current_audio_level() -> f32 {
+    // A disconnected/dead input must not leave a frozen non-zero meter.
+    if now_ms().saturating_sub(LAST_LEVEL_MS.load(Ordering::Relaxed)) > 1000 {
+        return 0.0;
+    }
     f32::from_bits(CURRENT_AUDIO_LEVEL.load(Ordering::Relaxed))
 }
 
 /// Reset audio level to 0
 pub fn reset_audio_level() {
     CURRENT_AUDIO_LEVEL.store(0, Ordering::Relaxed);
+    LAST_LEVEL_MS.store(0, Ordering::Relaxed);
 }
 
 /// Calculate RMS level from samples
@@ -65,7 +83,23 @@ fn calculate_rms(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+    #[test]
+    fn stale_or_invalid_microphone_levels_never_look_healthy() {
+        set_audio_level(0.25);
+        assert_eq!(get_current_audio_level(), 0.25);
+        LAST_LEVEL_MS.store(now_ms().saturating_sub(2000), Ordering::Relaxed);
+        assert_eq!(get_current_audio_level(), 0.0);
+        set_audio_level(f32::NAN);
+        assert_eq!(get_current_audio_level(), 0.0);
+        reset_audio_level();
+    }
+}
+
 pub struct MicAudioRecorder {
+    device_name: String,
     should_stop: Arc<AtomicBool>,
     processing_thread: Option<thread::JoinHandle<()>>,
     // Stream must be kept alive to keep recording
@@ -82,24 +116,10 @@ impl MicAudioRecorder {
     #[allow(deprecated)] // cpal `DeviceTrait::name` — kept for stable device labels
     pub fn new(
         output_path: std::path::PathBuf,
-        device_name: Option<String>,
+        device: cpal::Device,
         skip_file: bool,
     ) -> Result<Self> {
-        let host = cpal::default_host();
-
-        // Use selected device if specified, otherwise fall back to default
-        let device = if let Some(ref name) = device_name {
-            crate::devices::get_device_by_name(name)
-                .or_else(|| {
-                    eprintln!("Device '{}' not found, using default", name);
-                    host.default_input_device()
-                })
-                .ok_or(anyhow::anyhow!("No input device available"))?
-        } else {
-            host.default_input_device()
-                .ok_or(anyhow::anyhow!("No input device available"))?
-        };
-
+        reset_audio_level();
         // Use device's default config (native sample rate)
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate();
@@ -132,7 +152,7 @@ impl MicAudioRecorder {
         let active = ACTIVE_MIC_STREAMS.fetch_add(1, Ordering::Relaxed) + 1;
         log::info!(
             "[mic-debug] START #{start_n} | active_streams={active} (expect 1) | \
-             device='{device_id}' requested={device_name:?} | sample_rate={sample_rate} \
+             device='{device_id}' | sample_rate={sample_rate} \
              channels={channels} sample_format={sample_format:?} buffer_size={buffer_size} \
              ring_buffer_samples={ring_buffer_size} skip_file={skip_file} out={}",
             output_path.display()
@@ -163,10 +183,15 @@ impl MicAudioRecorder {
         });
 
         Ok(Self {
+            device_name: device_id,
             should_stop,
             processing_thread: Some(handle),
             stream: Some(stream),
         })
+    }
+
+    pub(crate) fn device_name(&self) -> &str {
+        &self.device_name
     }
 
     pub fn stop(&mut self) {
@@ -200,10 +225,10 @@ impl Drop for MicAudioRecorder {
 
 pub fn start_mic_capture(
     output_path: std::path::PathBuf,
-    device_name: Option<String>,
+    device: cpal::Device,
     skip_file: bool,
 ) -> Result<MicAudioRecorder> {
-    MicAudioRecorder::new(output_path, device_name, skip_file)
+    MicAudioRecorder::new(output_path, device, skip_file)
 }
 
 /// Convert interleaved audio samples to planar stereo format.

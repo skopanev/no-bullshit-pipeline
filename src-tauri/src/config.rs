@@ -169,6 +169,9 @@ pub struct AppSettings {
     /// Save only the mixed audio file (default: true)
     #[serde(default = "default_true")]
     pub save_mix_only: bool,
+    /// Input for recordings/meetings, independent of Quick Dictate shortcuts.
+    #[serde(default)]
+    pub recording_device_name: Option<String>,
     /// Default pipeline to auto-assign to new recordings (set in Settings > Audio)
     #[serde(default)]
     pub default_pipeline: Option<String>,
@@ -332,6 +335,7 @@ impl Default for AppSettings {
             transcription: TranscriptionConfig::default(),
             show_recording_notification: true,
             save_mix_only: true,
+            recording_device_name: None,
             default_pipeline: None,
             last_used_pipeline: None,
             auto_record_meetings: true,
@@ -429,6 +433,41 @@ pub fn save_settings_to_disk(settings: &mut AppSettings) -> Result<(), String> {
     let _guard = SETTINGS_WRITE_LOCK
         .lock()
         .map_err(|_| "Settings write lock poisoned".to_string())?;
+    // This preference is owned by the targeted recording-input setter. A stale
+    // settings form must not undo a microphone selected in Recording settings.
+    preserve_recording_device(settings, &get_settings_path())?;
+    persist_settings(settings)
+}
+
+fn preserve_recording_device(
+    settings: &mut AppSettings,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    match File::open(path) {
+        Ok(file) => {
+            let saved: AppSettings = serde_json::from_reader(file).map_err(|e| e.to_string())?;
+            settings.recording_device_name = saved.recording_device_name;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(())
+}
+
+/// Read-modify-write under the same lock; input changes must not erase other
+/// settings saved concurrently. Never modify dictation shortcut inputs here.
+pub(crate) fn set_recording_device(device_name: Option<String>) -> Result<(), String> {
+    let _guard = SETTINGS_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
+    let mut settings: AppSettings = match File::open(get_settings_path()) {
+        Ok(file) => serde_json::from_reader(file).map_err(|e| e.to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AppSettings::default(),
+        Err(e) => return Err(e.to_string()),
+    };
+    settings.recording_device_name = device_name;
+    persist_settings(&settings)
+}
+
+fn persist_settings(settings: &AppSettings) -> Result<(), String> {
     let config_dir = get_config_dir();
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
@@ -487,4 +526,46 @@ pub async fn save_settings(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod recording_microphone_tests {
+    use super::*;
+    #[test]
+    fn stale_settings_form_cannot_undo_a_recording_microphone_selection() {
+        let stored = tempfile::NamedTempFile::new().unwrap();
+        let mut current = AppSettings::default();
+        current.recording_device_name = Some("MacBook Microphone".into());
+        fs::write(stored.path(), serde_json::to_vec(&current).unwrap()).unwrap();
+        let mut stale_form = AppSettings::default();
+        stale_form.theme = "light".into();
+        preserve_recording_device(&mut stale_form, stored.path()).unwrap();
+        assert_eq!(
+            stale_form.recording_device_name,
+            current.recording_device_name
+        );
+        assert_eq!(stale_form.theme, "light");
+    }
+    #[test]
+    fn old_settings_and_dictation_microphones_remain_compatible() {
+        let settings = AppSettings::default();
+        let mut json = serde_json::to_value(settings).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("recording_device_name");
+        json["dictation"]["shortcuts"] = serde_json::json!([
+            {"id": "dictate-1", "hotkey": "cmd+d", "device_name": "AirPods"}
+        ]);
+        let mut old: AppSettings = serde_json::from_value(json).unwrap();
+        assert!(old.recording_device_name.is_none());
+        let dictation = serde_json::to_value(&old.dictation).unwrap();
+        old.recording_device_name = Some("MacBook Microphone".into());
+        let saved: AppSettings =
+            serde_json::from_slice(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(
+            saved.recording_device_name.as_deref(),
+            Some("MacBook Microphone")
+        );
+        assert_eq!(serde_json::to_value(saved.dictation).unwrap(), dictation);
+    }
 }

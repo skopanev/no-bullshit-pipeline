@@ -56,6 +56,10 @@ pub fn start_recording(
     // opening the microphone concurrently. It rolls back automatically if any
     // setup step below fails.
     let mut capture_claim = crate::capture_coordinator::claim_recording(&app_handle)?;
+    // Resolve the input before creating any recording or mixer. A missing
+    // pinned mic is an actionable error, not a silently substituted input.
+    let selected = crate::config::load_settings().recording_device_name;
+    let mic_device = crate::devices::recording_device(selected.as_deref())?;
 
     // Leaked-session probe: at the start of a fresh recording no mic stream
     // should be alive. >0 here means a prior session never disposed its cpal
@@ -95,7 +99,7 @@ pub fn start_recording(
 
     // --- Microphone Capture ---
     let mic_path = storage::get_recording_dir(&metadata.id).join("raw_mic.ogg");
-    match crate::mic_audio::start_mic_capture(mic_path, None, save_mix_only) {
+    match crate::mic_audio::start_mic_capture(mic_path, mic_device, save_mix_only) {
         Ok(recorder) => {
             *state.mic_recorder.lock().map_err(|e| e.to_string())? = Some(recorder);
         }

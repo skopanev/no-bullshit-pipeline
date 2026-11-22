@@ -97,6 +97,7 @@ export function switchSettingsTab(tabName) {
 
   if (tabName === 'pipelines') emit('tab:pipelines');
   if (tabName === 'dictation') emit('tab:dictation');
+  if (tabName === 'recording') emit('tab:recording');
 
   const scroller = document.querySelector('#settings-view .detail-scroller');
   if (scroller) scroller.scrollTop = 0;
