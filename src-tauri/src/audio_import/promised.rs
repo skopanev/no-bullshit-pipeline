@@ -322,6 +322,13 @@ fn receive_promise(
     dir: Arc<StagingDir>,
 ) {
     let id = format!("receive-{}", Uuid::new_v4());
+    let receiving_work = match crate::update_gate::work() {
+        Ok(work) => work,
+        Err(failure) => {
+            error(app, &id, "Audio import", failure);
+            return;
+        }
+    };
     let (names, count) = promise_metadata(&receiver);
     if count > MAX_DROP_FILES {
         error(
@@ -351,6 +358,7 @@ fn receive_promise(
     let callback_id = id.clone();
     let callback_title = title.clone();
     let block = RcBlock::new(move |url: *mut NSURL, failure: *mut NSError| {
+        let _receiving_work = &receiving_work;
         let app = &callback_app;
         let id = &callback_id;
         let title = &callback_title;
@@ -455,6 +463,13 @@ fn received_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
 
 fn queue_import(app: tauri::AppHandle, path: PathBuf, source: Option<Arc<StagingDir>>) {
     let id = format!("import-{}", Uuid::new_v4());
+    let importing_work = match crate::update_gate::work() {
+        Ok(work) => work,
+        Err(failure) => {
+            error(&app, &id, "Audio import", failure);
+            return;
+        }
+    };
     let title = path
         .file_name()
         .unwrap_or_default()
@@ -476,6 +491,7 @@ fn queue_import(app: tauri::AppHandle, path: PathBuf, source: Option<Arc<Staging
     }
     emit(&app, event(&id, "importing", &title));
     tauri::async_runtime::spawn(async move {
+        let _importing_work = importing_work;
         let _source = source; // Keep the promised file until the copy/encode finishes; clean on every exit.
         match super::import_path(path).await {
             Ok(recording) => {

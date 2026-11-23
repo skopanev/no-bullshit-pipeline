@@ -450,6 +450,7 @@ pub async fn execute_pipeline_internal(
     pipeline_name: &str,
     app_handle: Option<&tauri::AppHandle>,
 ) -> Result<PipelineStatus, String> {
+    let _update_work = crate::update_gate::work()?;
     let key = format!("{}:{}", recording_id, pipeline_name);
 
     // Serialize execution: if the same pipeline is already running on this recording, wait.

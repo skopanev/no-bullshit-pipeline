@@ -77,15 +77,17 @@ async function init() {
   await loadPipelineDefs();
   renderRecordingsList();
 
+  let currentVersion = null;
   try {
     const version = await invoke('get_app_version');
+    currentVersion = version;
     const versionEl = document.getElementById('app-version');
     if (versionEl) versionEl.textContent = `v${version} `;
   } catch (err) { console.error('Failed to fetch version:', err); }
 
   // Background update check (startup + focus, at most once per 24h) — silent on
   // failure / no-newer-version.
-  initUpdateChecks();
+  initUpdateChecks(currentVersion);
 
   // ASR model version check for the active engine (server-side throttled to
   // daily; the banner only appears on a real, non-dismissed signal).

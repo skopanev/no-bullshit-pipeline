@@ -34,8 +34,14 @@ pub async fn import_audio_file(path: String) -> Result<RecordingMetadata, String
 static IMPORT_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 async fn import_path(path: PathBuf) -> Result<RecordingMetadata, String> {
+    let _update_work = crate::update_gate::work()?;
     let _slot = IMPORT_SLOT.acquire().await.map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || import_into(&path, &storage::get_data_dir()))
+    tauri::async_runtime::spawn_blocking(move || {
+        // The native encoder can outlive a cancelled command future.
+        let _work = _update_work;
+        let _permit = _slot;
+        import_into(&path, &storage::get_data_dir())
+    })
         .await
         .map_err(|e| format!("Audio import failed: {e}"))?
 }

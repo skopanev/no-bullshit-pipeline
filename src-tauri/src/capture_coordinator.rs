@@ -171,6 +171,9 @@ pub(crate) fn claim_recording(app: &AppHandle) -> Result<CaptureClaim, String> {
     let token = next_token();
     {
         let mut activity = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        if crate::update_gate::is_installing() {
+            return Err("An app update is in progress. Try again after restart.".into());
+        }
         if !matches!(*activity, CaptureActivity::Idle) {
             return Err(busy_error(&activity));
         }
@@ -193,6 +196,9 @@ pub(crate) fn claim_dictation(
     let token = next_token();
     {
         let mut activity = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        if crate::update_gate::is_installing() {
+            return Err("An app update is in progress. Try again after restart.".into());
+        }
         if !matches!(*activity, CaptureActivity::Idle) {
             return Err(busy_error(&activity));
         }

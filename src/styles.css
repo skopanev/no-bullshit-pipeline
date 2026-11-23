@@ -2450,6 +2450,24 @@ body.settings-open .detail-view {
   /* default palette (indigo) — keep variables as the base values above */
 }
 
+/* App updates stay in normal flow, outside the recording/settings views.
+   No dismiss action: only installing the update (or its withdrawal) clears it. */
+#update-banner {
+  flex-shrink: 0;
+  min-height: 44px;
+  border-radius: 0;
+  border-width: 0 0 1px;
+  padding: 8px 24px;
+  flex-wrap: wrap;
+}
+#update-banner[hidden] { display: none; }
+.update-banner__body { flex: 1; min-width: 160px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+#update-feedback { font-size: 12px; color: var(--text-secondary); }
+#update-progress { width: 100%; height: 4px; accent-color: var(--accent); }
+#update-progress[hidden] { display: none; }
+#update-download-btn { min-height: 36px; flex-shrink: 0; }
+#update-download-btn:disabled { cursor: default; opacity: 0.55; }
+
 /* Full-width system-style strip under the top bar (model update / download).
    A normal flow element inside `.app-body` (flex column): when shown it takes
    `--model-banner-h` and the app-layout below flexes smaller automatically;

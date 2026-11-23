@@ -62,6 +62,7 @@ mod system_audio;
 pub mod transcribe_cli;
 mod transcript_migration;
 pub mod transcription;
+mod update_gate;
 mod updater;
 mod vocab;
 mod wake_observer;
@@ -200,6 +201,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         // tauri-plugin-window-state removed: on fractionally-scaled displays
         // it loses the scale factor every save→restore cycle, shrinking the
@@ -428,6 +430,8 @@ pub fn run() {
             app_icons::get_app_icon,
             has_apple_speech,
             updater::check_for_updates,
+            updater::get_app_update_status,
+            updater::install_app_update,
             audio::start_recording,
             audio::stop_recording,
             audio::pause_recording,

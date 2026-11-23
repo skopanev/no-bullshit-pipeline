@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "nbp",
-  "version": "0.7.8",
+  "version": "0.7.9",
   "identifier": "one.nbp.skk",
   "build": {
     "frontendDist": "../src"
@@ -23,11 +23,18 @@
     }
   },
   "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYyMUEwNDkxRDJDNTQ4OTQKUldTVVNNWFNrUVFhOGpYUFYxbjVCNG4wcmFuM2MyWEZyVlF4YzM2b09iS2xDNk5Ya3p4dndnejQK",
+      "endpoints": [
+        "https://github.com/skopanev/no-bullshit-pipeline/releases/latest/download/latest.json"
+      ]
+    },
     "shell": {
       "open": true
     }
   },
   "bundle": {
+    "createUpdaterArtifacts": true,
     "active": true,
     "targets": "all",
     "externalBin": [

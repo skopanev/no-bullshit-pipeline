@@ -1,6 +1,6 @@
 [package]
 name = "nbp"
-version = "0.7.8"
+version = "0.7.9"
 description = "A Tauri App"
 authors = ["sk"]
 edition = "2024"
@@ -29,6 +29,7 @@ objc2-event-kit = "0.3"
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAction", "UNNotification", "UNNotificationSettings", "block2"] }
 block2 = "0.6"
 tauri-plugin-opener = "2.5.4"
+tempfile = "3.27"
 tauri-plugin-dialog = "2.7"
 tauri-plugin-shell = "2.3"
 serde = { version = "1", features = ["derive"] }
@@ -60,6 +61,8 @@ sha2 = "0.11"
 shell-words = "1.1"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-log = "2"
+tauri-plugin-updater = "=2.10.1"
+minisign-verify = "=0.2.5"
 tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-global-shortcut = "2"
 audioadapter = "5.0.0"
@@ -81,6 +84,3 @@ opt-level = 3
 
 [profile.dev.package.vorbis_rs]
 opt-level = 3
-
-[dev-dependencies]
-tempfile = "3.27"

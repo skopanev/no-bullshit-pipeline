@@ -119,6 +119,7 @@ pub async fn transcribe_recording(
     recording_id: String,
     transcription_state: tauri::State<'_, TranscriptionState>,
 ) -> Result<String, String> {
+    let _update_work = crate::update_gate::work()?;
     {
         let mut active = transcription_state
             .active_ids

@@ -1,65 +1,80 @@
-// Check GitHub Releases for a newer version on startup and on window focus
-// (the app lives in the tray for days, so a startup-only check goes stale),
-// but at most once per 24h — the last check time survives restarts. If one
-// exists, reveal the #update-banner with a Download link to the release page.
-// Network failures / no-newer-version → silent no-op (banner stays hidden).
-//
-// Banner uses the unified .app-banner component — see styles.css for the
-// component contract; do not introduce a bespoke banner class for this.
+import { invoke, listen } from './core/tauri.js';
+import * as state from './core/state.js';
+import { createUpdateChecker } from './update-checker.js';
+import { createUpdateInstaller, updateProgressText } from './update-installer.js';
 
-import { invoke } from './core/tauri.js';
+let initialized = false;
+const isBusy = () => state.isRecording || state.isRecordingBusy || state.transcribingIds.size > 0 ||
+  state.queuedTranscriptionIds.size > 0 || state.pendingImports.size > 0 || state.pendingAutoExec.size > 0;
+const setText = (element, value) => { if (element.textContent !== value) element.textContent = value; };
 
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const LAST_CHECK_KEY = 'nbp.updateLastCheck';
-
-let lastCheckMs = 0;
-try {
-  lastCheckMs = Number(localStorage.getItem(LAST_CHECK_KEY)) || 0;
-} catch (_e) { /* storage unavailable — fall back to in-memory only */ }
-
-function checkIfDue() {
-  if (Date.now() - lastCheckMs < CHECK_INTERVAL_MS) return;
-  checkForUpdates();
-}
-
-export function initUpdateChecks() {
-  checkIfDue();
-  window.addEventListener('focus', checkIfDue);
-}
-
-async function checkForUpdates() {
-  lastCheckMs = Date.now();
-  try {
-    localStorage.setItem(LAST_CHECK_KEY, String(lastCheckMs));
-  } catch (_e) { /* in-memory throttle still applies */ }
-  let info = null;
-  try {
-    info = await invoke('check_for_updates');
-  } catch (_e) {
-    // Offline / API error — keep quiet, banner stays hidden.
-    return;
-  }
-  if (!info) return;
-
-  const banner = document.getElementById('update-banner');
-  const text = document.getElementById('update-banner-text');
-  const dl = document.getElementById('update-download-btn');
-  const dismiss = document.getElementById('update-dismiss-btn');
-  if (!banner || !text || !dl || !dismiss) return;
-
-  text.textContent = `${info.version} available — you have v${info.current}`;
-  banner.style.display = '';
-
-  dl.onclick = async () => {
-    try {
-      const opener = window.__TAURI__?.opener;
-      if (opener?.openUrl) await opener.openUrl(info.url);
-    } catch (err) {
-      console.error('Failed to open release URL:', err);
-    }
+export function initUpdateChecks(currentVersion) {
+  if (initialized) return;
+  initialized = true;
+  const start = async () => {
+    const current = currentVersion || await invoke('get_app_version');
+    const banner = document.getElementById('update-banner');
+    const text = document.getElementById('update-banner-text');
+    const button = document.getElementById('update-download-btn');
+    const feedback = document.getElementById('update-feedback');
+    const meter = document.getElementById('update-progress');
+    if (!banner || !text || !button || !feedback || !meter) return;
+    let available = null;
+    let progress = null;
+    let nativeBusy = false;
+    let pollInFlight = false;
+    let checker;
+    const render = () => {
+      const active = progress && !['error', 'idle'].includes(progress.phase);
+      banner.hidden = !available && !active;
+      if (banner.hidden) return;
+      setText(text, available ? `Update available: v${available.version.replace(/^v/, '')} · installed v${current}` : 'App update');
+      button.disabled = Boolean(active || nativeBusy || isBusy());
+      setText(button, active ? 'UPDATING…' : progress?.phase === 'error' ? 'RETRY' : 'UPDATE');
+      setText(feedback, updateProgressText(progress) || (button.disabled ? 'Finish current tasks before updating.' : 'Downloads, installs and restarts the app.'));
+      meter.hidden = progress?.phase !== 'downloading';
+      if (progress?.total > 0) meter.value = Math.min(100, progress.downloaded / progress.total * 100);
+      else meter.removeAttribute('value');
+    };
+    const installer = createUpdateInstaller({
+      status: () => invoke('get_app_update_status'),
+      install: args => invoke('install_app_update', args),
+      listen: callback => listen('app-update-progress', event => callback(event.payload)),
+      isBusy,
+      onState: next => {
+        progress = next;
+        render();
+        if (next.phase === 'error') void checker.checkIfDue(true);
+      },
+    });
+    button.onclick = () => { if (available) void installer.start(available.version); };
+    let storage;
+    try { storage = localStorage; } catch { /* Availability still works in memory. */ }
+    checker = createUpdateChecker({
+      currentVersion: current,
+      check: () => invoke('check_for_updates'),
+      storage,
+      onUpdate: info => { available = info; render(); },
+    });
+    const poll = async () => {
+      if (!available || document.hidden || pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const status = await invoke('get_app_update_status');
+        nativeBusy = status.busy || status.installing;
+      } catch { /* Click performs the authoritative status check again. */ }
+      finally { pollInFlight = false; render(); }
+    };
+    const onFocus = () => { void checker.checkIfDue(); void poll(); };
+    window.addEventListener('focus', onFocus);
+    const statusTimer = setInterval(() => { render(); void poll(); }, 1000);
+    const checkTimer = setInterval(() => { void checker.checkIfDue(); }, 15 * 60 * 1000);
+    window.addEventListener('pagehide', () => {
+      clearInterval(statusTimer);
+      clearInterval(checkTimer);
+      window.removeEventListener('focus', onFocus);
+    }, { once: true });
+    void checker.checkIfDue();
   };
-
-  dismiss.onclick = () => {
-    banner.style.display = 'none';
-  };
+  void start().catch(error => console.error('Cannot initialize update checks:', error));
 }
